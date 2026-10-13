@@ -1,3 +1,4 @@
+.github/scripts/setup-java25.sh
 .github/workflows/ci.yml
 .gitignore
 BUILDING.md

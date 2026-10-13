@@ -13,10 +13,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
-        with:
-          distribution: temurin
-          java-version: '25.0.4.1+1'
+      - name: Install the checksum-pinned official Java 25 build
+        run: bash .github/scripts/setup-java25.sh
       - name: Build and run disposable fixture tests
         run: bash gradlew --no-daemon clean release check
       - name: Verify the tested release bytes
