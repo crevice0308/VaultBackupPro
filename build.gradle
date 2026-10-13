@@ -1,7 +1,7 @@
 plugins { id 'java' }
 if (Runtime.version().feature() != 25) throw new GradleException('Run Gradle with JDK 25 (set JAVA_HOME).')
 group = 'com.vaultbackup'
-version = '1.1.0'
+version = '1.2.0'
 repositories {
  mavenCentral { content { excludeGroup 'org.spigotmc' } }
  exclusiveContent {
@@ -97,7 +97,7 @@ tasks.register('restoreTest', JavaExec) {
  dependsOn testClasses, restoreJar
  classpath = sourceSets.test.runtimeClasspath
  mainClass = 'com.vaultbackup.restore.RestoreSafetyTest'
- args layout.buildDirectory.file('libs/vaultbackup-restore-1.1.0.jar').get().asFile.absolutePath
+ args layout.buildDirectory.file('libs/vaultbackup-restore-1.2.0.jar').get().asFile.absolutePath
 }
 tasks.register('settingsTest', JavaExec) {
  dependsOn testClasses
@@ -144,3 +144,11 @@ tasks.register('dependencyInventory') {
   layout.buildDirectory.file('dependency-inventory.json').get().asFile.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(rows.values()))
  }
 }
+
+tasks.register('startupTest', JavaExec) {
+ dependsOn testClasses, restoreJar
+ classpath = sourceSets.test.runtimeClasspath
+ mainClass = 'com.vaultbackup.restore.RestoreStartupTest'
+ args tasks.named('restoreJar').get().archiveFile.get().asFile.absolutePath
+}
+check.dependsOn startupTest

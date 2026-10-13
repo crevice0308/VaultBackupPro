@@ -42,7 +42,7 @@ final class RestoreJobState {
     }
     /** Caller holds job gate. A durable tombstone is never removed or overwritten. */
     static void requestCancellation(Path dir,Properties job)throws IOException {
-        if(hasCancellation(dir)) {cancellation(dir,job);return;}
+        if(hasCancellation(dir)) {cancellation(dir,job);RestoreFiles.syncDirectory(dir);return;}
         Properties p=new Properties();p.setProperty("jobId",RestoreFiles.required(job,"jobId"));
         p.setProperty("cancelId",RestoreFiles.randomSecret());p.setProperty("cancelledAt",Instant.now().toString());
         p.setProperty("authentication",RestoreFiles.hmac(RestoreFiles.required(job,"nonce"),String.join("\n",p.getProperty("jobId"),p.getProperty("cancelId"),p.getProperty("cancelledAt"))));
@@ -66,6 +66,10 @@ final class RestoreJobState {
                 || !RestoreFiles.required(cancel,"cancelId").equals(RestoreFiles.required(ack,"cancelId")))throw new IOException("Cancellation acknowledgment does not match this request");
         if(!Set.of("HELPER","CONFIRMED_HELPER_DEATH","NOT_LAUNCHED").contains(RestoreFiles.required(ack,"source")))throw new IOException("Invalid cancellation acknowledgment source");
         if(!RestoreFiles.constantEquals(RestoreFiles.required(ack,"authentication"),RestoreFiles.hmac(RestoreFiles.required(job,"nonce"),ackPayload(ack))))throw new IOException("Cancellation acknowledgment authentication failed");
+        // A previous atomic rename may have succeeded before directory fsync
+        // failed. Re-establish durability before an acknowledgment authorizes
+        // clearing the active marker and unpinning its backup.
+        RestoreFiles.syncDirectory(dir);
         return true;
     }
     private static String ackPayload(Properties p)throws IOException {
@@ -92,6 +96,41 @@ final class RestoreJobState {
     }
     private static String processPayload(Properties p)throws IOException {
         return String.join("\n",RestoreFiles.required(p,"jobId"),RestoreFiles.required(p,"pid"),RestoreFiles.required(p,"startedAt"));
+    }
+    /** Called only after the helper atomically returned the preserved original tree to root. */
+    static void recordCompletedRecovery(Path dir,Properties job,String outcome)throws IOException {
+        if(!Set.of("FAILED_ROLLED_BACK","RECOVERED").contains(outcome))throw new IOException("Invalid recovery outcome");
+        requireRecoveredTree(job);
+        if(Files.exists(dir.resolve("receipt.properties"),RestoreFiles.NOFOLLOW))throw new IOException("Successful restore receipt conflicts with completed recovery");
+        Properties receipt=new Properties();receipt.setProperty("formatVersion","1");
+        for(String key:List.of("jobId","backupId","serverRoot","archiveSha256","manifestSha256","stage","rollback","failed"))
+            receipt.setProperty(key,RestoreFiles.required(job,key));
+        receipt.setProperty("outcome",outcome);receipt.setProperty("completedAt",Instant.now().toString());
+        receipt.setProperty("authentication",RestoreFiles.hmac(RestoreFiles.required(job,"nonce"),RestoreFiles.recoveryPayload(receipt)));
+        RestoreFiles.write(dir.resolve("recovery-receipt.properties"),receipt);
+    }
+    static Properties verifiedRecovery(Path dir,Properties job)throws IOException {
+        Properties receipt=RestoreFiles.load(dir.resolve("recovery-receipt.properties"));
+        if(!RestoreFiles.required(receipt,"formatVersion").equals("1") || !Set.of("FAILED_ROLLED_BACK","RECOVERED").contains(RestoreFiles.required(receipt,"outcome")))throw new IOException("Invalid completed-recovery receipt format/outcome");
+        for(String key:List.of("jobId","backupId","serverRoot","archiveSha256","manifestSha256","stage","rollback","failed"))
+            if(!RestoreFiles.required(job,key).equals(RestoreFiles.required(receipt,key)))throw new IOException("Recovery receipt does not match job: "+key);
+        if(!RestoreFiles.constantEquals(RestoreFiles.required(receipt,"authentication"),RestoreFiles.hmac(RestoreFiles.required(job,"nonce"),RestoreFiles.recoveryPayload(receipt))))throw new IOException("Completed-recovery receipt authentication failed");
+        try {Instant.parse(RestoreFiles.required(receipt,"completedAt"));}catch(RuntimeException e){throw new IOException("Invalid completed-recovery timestamp",e);}
+        requireRecoveredTree(job);
+        if(Files.exists(dir.resolve("receipt.properties"),RestoreFiles.NOFOLLOW))throw new IOException("Successful restore receipt conflicts with completed recovery");
+        return receipt;
+    }
+    private static void requireRecoveredTree(Properties job)throws IOException {
+        Path root=RestoreFiles.directory(Path.of(RestoreFiles.required(job,"serverRoot")),false);
+        String id=RestoreFiles.required(job,"jobId");
+        for(String kind:List.of("stage","rollback","failed")) {
+            Path path=Path.of(RestoreFiles.required(job,kind));
+            if(!path.equals(root.resolveSibling(root.getFileName()+".vaultbackup-"+kind+"-"+id)))throw new IOException("Invalid recovery sibling binding: "+kind);
+            if(Files.exists(path,RestoreFiles.NOFOLLOW)) {
+                if(kind.equals("rollback"))throw new IOException("Original rollback tree remains; recovery is not complete");
+                RestoreFiles.directory(path,false);
+            }
+        }
     }
     static void noteNormalShutdown(Path dir,Properties job)throws IOException {
         Properties p=new Properties();

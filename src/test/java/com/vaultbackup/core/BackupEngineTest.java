@@ -10,6 +10,7 @@ import java.nio.file.attribute.FileTime;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.zip.*;
 
@@ -27,8 +28,10 @@ public final class BackupEngineTest {
             cancellationAndMutation();
             symlinksAndUnsafePaths();
             corruptionAndIncompleteArchives();
-            retentionAndLastGood();
-            explicitManualDeletionConsent();
+            retentionWithoutFloor();
+            manualDeletionWithoutFloor();
+            deletionAndRetentionRejectSymlinkTargets();
+            concurrentStoreMutationIsRefused();
             maliciousArchivesAndLimits();
             storeLockIsFailFast();
             System.out.println("PASS BackupEngineTest (" + checks + " checks)");
@@ -69,7 +72,8 @@ public final class BackupEngineTest {
         try (var files = Files.list(engine.backupDirectory())) {
             check(files.noneMatch(p -> p.toString().endsWith(".part")), "no part files after success");
         }
-        expectIOException(() -> engine.delete(record.id(), Set.of()), "cannot delete last good");
+        engine.delete(record.id(), Set.of());
+        equal(engine.listBackups().size(), 0, "ordinary deletion may remove the final recovery point");
     }
 
     private static void allowAndDenyPatterns() throws Exception {
@@ -149,7 +153,7 @@ public final class BackupEngineTest {
         equal(engine.listBackups().size(), 0, "malformed sidecar ignored");
     }
 
-    private static void retentionAndLastGood() throws Exception {
+    private static void retentionWithoutFloor() throws Exception {
         BackupEngine engine = engine("retention");
         Files.writeString(engine.serverRoot().resolve("x"), "first");
         BackupRecord first = engine.createBackup("first");
@@ -158,42 +162,55 @@ public final class BackupEngineTest {
         BackupRecord second = engine.createBackup("second");
         Thread.sleep(2);
         BackupRecord third = engine.createBackup("third");
-        expectIOException(() -> engine.delete(first.id(), Set.of(first.id())), "reserved target cannot be deleted");
+        expectRefusal(() -> engine.delete(first.id(), Set.of(first.id())),
+                BackupDeletionRefusedException.Reason.RESTORE_PROTECTED, first.id());
         List<BackupRecord> removed = engine.retain(1, 1, Set.of(first.id(), third.id()), () -> false, ignored -> {});
         equal(removed.stream().map(BackupRecord::id).toList(), List.of(second.id()), "retention skips reserved targets");
-        equal(engine.listBackups().size(), 2, "retention preserves all reserved targets");
-        engine.retain(1, 1, Set.of(), () -> false, ignored -> {});
-        equal(engine.listBackups().size(), 1, "retention preserves last good over byte budget");
-        expectIOException(() -> engine.delete(engine.listBackups().getFirst().id(), Set.of()), "last good survives explicit delete");
+        equal(engine.listBackups().size(), 2, "retention preserves all reserved targets over both limits");
+        removed = engine.retain(1, Long.MAX_VALUE, Set.of(), () -> false, ignored -> {});
+        equal(removed.stream().map(BackupRecord::id).toList(), List.of(first.id()), "count retention removes oldest first");
+        equal(engine.listBackups().stream().map(BackupRecord::id).toList(), List.of(third.id()), "count retention meets positive limit");
+        removed = engine.retain(1, 1, Set.of(), () -> false, ignored -> {});
+        equal(removed.stream().map(BackupRecord::id).toList(), List.of(third.id()), "byte retention removes final good archive");
+        equal(engine.listBackups().size(), 0, "impossible positive byte budget leaves zero verified archives");
+        check(!Files.exists(third.zipPath()) && !Files.exists(third.metadataPath()), "retention removes final archive and sidecar");
+        equal(engine.retain(1, 1, Set.of(), () -> false, ignored -> {}).size(), 0, "retention of empty store removes nothing");
+        BackupRecord recreated = engine.createBackup("after-retention-zero");
+        equal(engine.verify(recreated.id()).id(), recreated.id(), "backup creation works after zero retention");
+        equal(engine.retain(Integer.MAX_VALUE, Long.MAX_VALUE, Set.of(), () -> false, ignored -> {}).size(), 0,
+                "unlimited settings mapped by plugin preserve archives");
+
+        BackupEngine all = engine("retention-all");
+        Files.writeString(all.serverRoot().resolve("x"), "data");
+        BackupRecord oldest = all.createBackup("oldest");
+        Thread.sleep(2);
+        BackupRecord newest = all.createBackup("newest");
+        equal(all.retain(1, 1, Set.of(), () -> false, ignored -> {}).stream().map(BackupRecord::id).toList(),
+                List.of(oldest.id(), newest.id()), "one retention pass can remove every archive oldest first");
+        equal(all.listBackups().size(), 0, "all-pruned store truthfully reports zero");
+        expectIOException(() -> all.retain(-1, 1, Set.of(), () -> false, ignored -> {}), "negative count limit rejected");
+        expectIOException(() -> all.retain(1, -1, Set.of(), () -> false, ignored -> {}), "negative byte limit rejected");
     }
 
-    private static void explicitManualDeletionConsent() throws Exception {
-        BackupEngine engine = engine("manual-consent");
+    private static void manualDeletionWithoutFloor() throws Exception {
+        BackupEngine engine = engine("manual-no-floor");
         Files.writeString(engine.serverRoot().resolve("x"), "first");
         BackupRecord first = engine.createBackup("first");
-        byte[] archive = Files.readAllBytes(first.zipPath());
-        byte[] metadata = Files.readAllBytes(first.metadataPath());
-        expectRefusal(() -> engine.delete(first.id(), Set.of()),
-                BackupDeletionRefusedException.Reason.LAST_GOOD_CONFIRMATION_REQUIRED, first.id());
-        check(Arrays.equals(archive, Files.readAllBytes(first.zipPath()))
-                && Arrays.equals(metadata, Files.readAllBytes(first.metadataPath())), "unwarned last backup stays byte-identical");
         BackupRecord second = engine.createBackup("second");
-        engine.delete(first.id(), Set.of(), false);
-        check(!Files.exists(first.zipPath()) && !Files.exists(first.metadataPath()), "ordinary consent deletes with a second valid backup");
+        engine.delete(first.id(), Set.of());
+        check(!Files.exists(first.zipPath()) && !Files.exists(first.metadataPath()), "ordinary deletion removes archive and sidecar");
         equal(engine.listBackups().stream().map(BackupRecord::id).toList(), List.of(second.id()), "ordinary delete preserves other backup");
-        // A stale two-backup confirmation must not silently acquire permission for zero.
-        expectRefusal(() -> engine.delete(second.id(), Set.of(), false),
-                BackupDeletionRefusedException.Reason.LAST_GOOD_CONFIRMATION_REQUIRED, second.id());
-        expectRefusal(() -> engine.delete(second.id(), Set.of(second.id()), true),
+        byte[] archive = Files.readAllBytes(second.zipPath());
+        byte[] metadata = Files.readAllBytes(second.metadataPath());
+        expectRefusal(() -> engine.delete(second.id(), Set.of(second.id())),
                 BackupDeletionRefusedException.Reason.RESTORE_PROTECTED, second.id());
-        equal(engine.verify(second.id()).id(), second.id(), "even explicit last consent cannot delete a restore reservation");
-        engine.retain(1, 1, Set.of(), () -> false, ignored -> {});
-        equal(engine.listBackups().size(), 1, "automatic retention still keeps last good backup");
-        engine.delete(second.id(), Set.of(), true);
-        equal(engine.listBackups().size(), 0, "warned confirmed manual deletion may leave zero");
-        check(!Files.exists(second.zipPath()) && !Files.exists(second.metadataPath()), "confirmed last deletion removes archive and sidecar");
-        try { engine.delete(second.id(), Set.of(), true); throw new AssertionError("missing deletion accepted"); }
-        catch (IOException expected) { check(!(expected instanceof BackupDeletionRefusedException), "missing backup remains unexpected IO diagnostic"); }
+        check(Arrays.equals(archive, Files.readAllBytes(second.zipPath()))
+                && Arrays.equals(metadata, Files.readAllBytes(second.metadataPath())), "reserved final backup stays byte-identical");
+        engine.delete(second.id(), Set.of());
+        equal(engine.listBackups().size(), 0, "ordinary manual deletion may leave zero without a special flag");
+        check(!Files.exists(second.zipPath()) && !Files.exists(second.metadataPath()), "final deletion removes archive and sidecar");
+        try { engine.delete(second.id(), Set.of()); throw new AssertionError("missing deletion accepted"); }
+        catch (IOException expected) { check(!(expected instanceof BackupDeletionRefusedException), "missing backup remains IO diagnostic"); }
         BackupRecord recreated = engine.createBackup("after-zero");
         equal(engine.verify(recreated.id()).id(), recreated.id(), "backup creation works after deleting final generation");
 
@@ -202,14 +219,74 @@ public final class BackupEngineTest {
         BackupRecord good = corruptEngine.createBackup("good");
         BackupRecord corrupt = corruptEngine.createBackup("will-corrupt");
         Files.write(corrupt.zipPath(), new byte[]{1,2,3});
-        expectRefusal(() -> corruptEngine.delete(good.id(), Set.of(), false),
-                BackupDeletionRefusedException.Reason.LAST_GOOD_CONFIRMATION_REQUIRED, good.id());
-        equal(corruptEngine.verify(good.id()).id(), good.id(), "corrupt second backup is insufficient to bypass warning");
-        try { corruptEngine.delete(corrupt.id(), Set.of(), true); throw new AssertionError("corrupt deletion accepted"); }
-        catch (IOException expected) { check(!(expected instanceof BackupDeletionRefusedException), "corrupt target remains unexpected IO diagnostic"); }
-        corruptEngine.delete(good.id(), Set.of(), true);
-        equal(corruptEngine.listBackups().size(), 0, "explicit last consent handles corrupt sibling without counting it");
+        try { corruptEngine.delete(corrupt.id(), Set.of()); throw new AssertionError("corrupt deletion accepted"); }
+        catch (IOException expected) { check(!(expected instanceof BackupDeletionRefusedException), "corrupt target remains IO diagnostic"); }
+        corruptEngine.delete(good.id(), Set.of());
+        equal(corruptEngine.listBackups().size(), 0, "manual deletion ignores corrupt siblings and may leave zero");
         check(Files.exists(corrupt.zipPath()) && Files.exists(corrupt.metadataPath()), "manual delete does not remove other corrupt files");
+        good = corruptEngine.createBackup("good-again");
+        equal(corruptEngine.retain(1, 1, Set.of(), () -> false, ignored -> {}).stream().map(BackupRecord::id).toList(),
+                List.of(good.id()), "retention removes final valid target with corrupt sibling present");
+        equal(corruptEngine.listBackups().size(), 0, "corrupt sibling does not fabricate a recovery point");
+        check(Files.exists(corrupt.zipPath()) && Files.exists(corrupt.metadataPath()), "retention leaves corrupt files for diagnosis");
+    }
+
+    private static void deletionAndRetentionRejectSymlinkTargets() throws Exception {
+        BackupEngine engine = engine("delete-links");
+        Files.writeString(engine.serverRoot().resolve("x"), "safe fixture");
+        BackupRecord record = engine.createBackup("linked-archive");
+        Path outside = Files.write(fixture.resolve("outside-archive.zip"), Files.readAllBytes(record.zipPath()));
+        byte[] untouched = Files.readAllBytes(outside);
+        Files.delete(record.zipPath());
+        Files.createSymbolicLink(record.zipPath(), outside);
+        expectIOException(() -> engine.delete(record.id(), Set.of()), "manual deletion rejects symlink archive");
+        equal(engine.retain(1, 1, Set.of(), () -> false, ignored -> {}).size(), 0, "retention ignores symlink archive");
+        check(Files.isSymbolicLink(record.zipPath()) && Files.exists(record.metadataPath()), "unsafe record is not removed");
+        check(Arrays.equals(untouched, Files.readAllBytes(outside)), "deletion and retention leave symlink destination untouched");
+        Files.delete(record.zipPath());
+        Files.write(record.zipPath(), untouched);
+        Path outsideMetadata = Files.write(fixture.resolve("outside-metadata.properties"), Files.readAllBytes(record.metadataPath()));
+        byte[] untouchedMetadata = Files.readAllBytes(outsideMetadata);
+        Files.delete(record.metadataPath());
+        Files.createSymbolicLink(record.metadataPath(), outsideMetadata);
+        expectIOException(() -> engine.delete(record.id(), Set.of()), "manual deletion rejects symlink metadata");
+        equal(engine.retain(1, 1, Set.of(), () -> false, ignored -> {}).size(), 0, "retention ignores symlink metadata");
+        check(Files.isSymbolicLink(record.metadataPath()) && Files.exists(record.zipPath()), "symlink sidecar record is not removed");
+        check(Arrays.equals(untouchedMetadata, Files.readAllBytes(outsideMetadata)), "symlink metadata destination stays untouched");
+    }
+
+    private static void concurrentStoreMutationIsRefused() throws Exception {
+        BackupEngine creating = engine("concurrent-mutation");
+        Files.writeString(creating.serverRoot().resolve("x"), "first");
+        BackupRecord first = creating.createBackup("first");
+        BackupEngine competing = new BackupEngine(creating.options());
+        CountDownLatch lockHeld = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try (ExecutorService worker = Executors.newSingleThreadExecutor()) {
+            Future<BackupRecord> created = worker.submit(() -> creating.createBackup("concurrent", () -> false, message -> {
+                if (message.equals("Scanning server files")) {
+                    lockHeld.countDown();
+                    try {
+                        if (!release.await(10, TimeUnit.SECONDS)) throw new IllegalStateException("Fixture release timed out");
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(e);
+                    }
+                }
+            }));
+            try {
+                check(lockHeld.await(10, TimeUnit.SECONDS), "concurrent creator holds store lock");
+                expectIOException(() -> competing.delete(first.id(), Set.of()), "manual delete refuses concurrent creator");
+                expectIOException(() -> competing.retain(1, 1, Set.of(), () -> false, ignored -> {}), "retention refuses concurrent creator");
+                equal(competing.verify(first.id()).id(), first.id(), "lock contention leaves existing recovery point valid");
+            } finally { release.countDown(); }
+            BackupRecord second = created.get(10, TimeUnit.SECONDS);
+            equal(competing.listBackups().size(), 2, "concurrent creation publishes without mutation");
+            competing.delete(first.id(), Set.of());
+            // The old catalogue may have had two entries; final deletion needs no extra mode.
+            competing.delete(second.id(), Set.of());
+            equal(competing.listBackups().size(), 0, "sequential deletes revalidate current store and may leave zero");
+        }
     }
 
     private static void maliciousArchivesAndLimits() throws Exception {
@@ -266,11 +343,14 @@ public final class BackupEngineTest {
     private static void storeLockIsFailFast() throws Exception {
         BackupEngine engine = engine("locked");
         Files.writeString(engine.serverRoot().resolve("x"), "x");
+        BackupRecord existing = engine.createBackup("existing");
         try (FileChannel channel = FileChannel.open(engine.backupDirectory().resolve(".vaultbackup.lock"),
                 StandardOpenOption.CREATE, StandardOpenOption.WRITE); FileLock ignored = channel.lock()) {
             expectIOException(() -> engine.createBackup("busy"), "busy store returns a checked failure");
+            expectIOException(() -> engine.delete(existing.id(), Set.of()), "busy store refuses deletion");
+            expectIOException(() -> engine.retain(1, 1, Set.of(), () -> false, progress -> {}), "busy store refuses retention");
         }
-        equal(engine.listBackups().size(), 0, "busy store publishes nothing");
+        equal(engine.listBackups().size(), 1, "busy store preserves existing archive and publishes nothing");
     }
 
     private record Part(String name, byte[] data) { }

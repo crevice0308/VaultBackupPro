@@ -17,6 +17,10 @@ public final class RestoreSafetyTest {
         if(args.length>0 && args[0].equals("--parent")){parent(Path.of(args[1]),Path.of(args[2]));return;}
         if(args.length>0 && args[0].equals("--gate")){holdGate(Path.of(args[1]));return;}
         if(args.length>0 && args[0].equals("--sleeper")){Thread.sleep(60000);return;}
+        if(args.length>0 && args[0].equals("--startup-probe")) {
+            Path fixture=Path.of(args[1]);var result=RestoreCoordinator.start(fixture.resolve("server"),fixture.resolve("backups"),fixture.resolve("state"),Path.of(args[2]),"en",message -> {});
+            Properties report=new Properties();report.setProperty("disposition",result.disposition().name());RestoreFiles.write(fixture.resolve("startup-probe.properties"),report);return;
+        }
         if(args.length!=1)throw new IllegalArgumentException("Pass standalone helper JAR path");
         helperJar=Path.of(args[0]).toAbsolutePath();
         Path temp=Files.createTempDirectory("vaultbackup-restore-test-");
@@ -24,6 +28,7 @@ public final class RestoreSafetyTest {
             archiveTests(temp.resolve("archives"));
             preconditionTests(temp.resolve("conditions"));
             handshakeFailureTest(temp.resolve("handshake"));
+            malformedHandshakeFailureTest(temp.resolve("malformed-handshake"));
             cancelThenStopTest(temp.resolve("cancel-stop"));
             cancellationGateTest(temp.resolve("cancel-gate"));
             cancellationAmbiguityTest(temp.resolve("cancel-ambiguity"));
@@ -113,6 +118,24 @@ public final class RestoreSafetyTest {
         await(()->Files.exists(result.jobFile().getParent().resolve("disarmed-test-helper")),Duration.ofSeconds(5),"test helper disarming",null,fixture);
         check(Files.readString(root.resolve("original")).equals("untouched"),"uncertain handshake leaves server untouched");
     }
+    /** A malformed Properties Unicode escape must take the same disarm path as an I/O failure. */
+    public static final class MalformedHandshakeHelper {
+        public static void main(String[] args)throws Exception {
+            Path dir=Path.of(args[1]).getParent();Files.writeString(dir.resolve("status.properties"),"status="+(char)92+"uZZZZ\n");
+            long deadline=System.nanoTime()+Duration.ofSeconds(20).toNanos();
+            while(!Files.exists(dir.resolve("cancel.properties")) && System.nanoTime()<deadline)Thread.sleep(10);
+            if(Files.exists(dir.resolve("cancel.properties")))Files.createFile(dir.resolve("disarmed-test-helper"));
+        }
+    }
+    private static void malformedHandshakeFailureTest(Path f)throws Exception {
+        Path root=fixture(f),archive=f.resolve("backups/snapshot.zip"),jar=fixtureJar(f,MalformedHandshakeHelper.class);
+        RestoreCoordinator coordinator=new RestoreCoordinator(root,f.resolve("backups"),f.resolve("state"),jar);
+        var reserved=coordinator.reserve("snapshot",archive,RestoreFiles.sha(archive),Duration.ofMinutes(1));var result=coordinator.confirm(reserved.token());
+        check(!result.helperReady() && result.message().contains("durably cancelled"),"malformed status handshake durably disarms launched helper");
+        Path dir=result.jobFile().getParent();check(RestoreJobState.acknowledged(dir,RestoreFiles.load(result.jobFile())),"malformed status never bypasses authenticated cancellation");
+        check(!Files.exists(f.resolve("state/active-restore.properties")) && coordinator.protectedBackupIds().isEmpty(),"malformed handshake cleanup occurs only after acknowledgment");
+        check(Files.readString(root.resolve("world/level.dat")).equals("ORIGINAL"),"malformed handshake leaves server data unchanged");
+    }
     private static void integration(Path fixture,boolean forceReceiptFailure)throws Exception {
         Files.createDirectories(fixture);Path root=Files.createDirectory(fixture.resolve("server"));Files.createDirectories(root.resolve("world"));Files.writeString(root.resolve("world/level.dat"),"ORIGINAL-CURRENT");Files.writeString(root.resolve("not-in-backup.txt"),"PRESERVE ORIGINAL");
         Path backups=Files.createDirectory(fixture.resolve("backups"));Files.createDirectory(fixture.resolve("state"));zip(backups.resolve("snapshot.zip"),Map.of("world/level.dat","BACKED-UP","server.properties","motd=restored"),List.of("empty"));
@@ -142,7 +165,10 @@ public final class RestoreSafetyTest {
                 check(Files.readString(Path.of(job.getProperty("failed")).resolve("world/level.dat")).equals("BACKED-UP"),"failed installation retained");
                 check(!Files.exists(jobDir.resolve("receipt.properties")),"failure has no success receipt");
                 awaitConfirmedDead(jobDir,job,Duration.ofSeconds(5),"failed helper exit",fixture);
-                RestoreCoordinator coordinator=new RestoreCoordinator(root,backups,fixture.resolve("state"),helperJar);check(coordinator.startupFailure().isPresent(),"failure available for red startup notification");
+                var startup=RestoreCoordinator.start(root,backups,fixture.resolve("state"),helperJar,"en",message -> {});
+                check(startup.disposition()==RestoreCoordinator.StartupDisposition.READY,"authenticated completed rollback permits normal startup");
+                check(RestoreJobState.verifiedRecovery(jobDir,job).getProperty("outcome").equals("FAILED_ROLLED_BACK"),"rollback receipt proves original-root restoration");
+                check(!Files.exists(fixture.resolve("state/active-restore.properties")) && RestoreJobState.acknowledged(jobDir,job),"completed rollback is permanently disarmed before cleanup");
             } else {
                 check(Files.readString(root.resolve("world/level.dat")).equals("BACKED-UP"),"backup data installed only after exit");
                 check(Files.readString(rollback.resolve("world/level.dat")).equals("ORIGINAL-CURRENT"),"entire original root preserved");
@@ -150,7 +176,9 @@ public final class RestoreSafetyTest {
                 check(Files.isDirectory(root.resolve("empty")),"empty archive directories restored");
                 try {check(Files.getPosixFilePermissions(root).equals(java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")),"POSIX restored root is owner-only to protect secrets");} catch(UnsupportedOperationException ignored) {}
                 Path receiptFile=jobDir.resolve("receipt.properties");Properties receipt=RestoreFiles.load(receiptFile);Properties altered=new Properties();altered.putAll(receipt);altered.setProperty("completedAt",Instant.EPOCH.toString());RestoreFiles.write(receiptFile,altered);
-                refuses(()->new RestoreCoordinator(root,backups,fixture.resolve("state"),helperJar),"unauthenticated SUCCESS cannot permit startup");
+                Process probe=spawn("--startup-probe",fixture.toString(),helperJar.toString());
+                check(probe.waitFor(10,java.util.concurrent.TimeUnit.SECONDS) && probe.exitValue()==0,"invalid-receipt startup probe exits");
+                check(RestoreFiles.load(fixture.resolve("startup-probe.properties")).getProperty("disposition").equals("HARD_CONFLICT"),"unauthenticated SUCCESS cannot permit startup");
                 RestoreFiles.write(receiptFile,receipt);
                 RestoreCoordinator coordinator=new RestoreCoordinator(root,backups,fixture.resolve("state"),helperJar);
                 RestoreFiles.write(receiptFile,altered);refuses(coordinator::consumeVerifiedReceipt,"tampered receipt must not report success");RestoreFiles.write(receiptFile,receipt);
@@ -222,6 +250,7 @@ public final class RestoreSafetyTest {
         refuses(()->RestoreMain.run(new String[]{"--job",jobFile.toString(),"--manual","--i-confirm-server-stopped"}),"uncertain journal cannot resume install");
         check(RestoreMain.run(new String[]{"--job",jobFile.toString(),"--recover","--i-confirm-server-stopped"})==0,"explicit stopped recovery succeeds");
         check(Files.readString(root.resolve("original")).equals("original"),"crash recovery restores original");check(Files.exists(stage.resolve("new")),"crash recovery preserves stage");check(!Files.exists(jobFile.getParent().resolve("receipt.properties")),"recovery does not claim restore success");
+        check(RestoreJobState.verifiedRecovery(jobFile.getParent(),stored).getProperty("outcome").equals("RECOVERED"),"explicit physical recovery emits authenticated completion receipt");
     }
     private static Properties manualJob(Path root,Path backups,Path state,Path archive,long pid,Instant start)throws Exception {
         String id=UUID.randomUUID().toString();Path dir=state.resolve("restore-jobs").resolve(id);Files.createDirectories(dir);var verified=RestoreArchive.verify(archive,RestoreFiles.sha(archive));Properties p=new Properties();

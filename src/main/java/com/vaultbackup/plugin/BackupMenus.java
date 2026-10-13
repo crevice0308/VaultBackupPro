@@ -78,42 +78,9 @@ final class BackupMenus implements Listener {
         m.display(4,Material.WRITABLE_BOOK,id,List.of(t("common.created",record.createdAt()),t("common.label",record.label()),
                 t("common.archive",VaultBackupPlugin.humanBytes(record.compressedBytes())),t("common.original",VaultBackupPlugin.humanBytes(record.totalBytes())),
                 t("common.entries",record.entryCount()),"SHA-256: "+record.sha256().substring(0,16)+"…"));
-        m.put(11,Material.LIME_CONCRETE,t("menu.restore"),List.of(t("menu.confirmtwice"),t("menu.restore.manual"),t("menu.restore.rollback")),"restore",who -> restoreWarning(who,id,page));
-        m.put(15,Material.RED_CONCRETE,t("menu.delete"),List.of(t("menu.delete.files"),t("menu.confirmtwice"),t("menu.delete.last"),t("menu.delete.zero"),t("menu.delete.norecovery"),t("menu.delete.pinned")),"delete",who -> deleteWarning(who,id,page));
+        m.put(11,Material.LIME_CONCRETE,t("menu.restore"),List.of(t("menu.selected",id),t("menu.restore.direct"),t("menu.restore.manual"),t("menu.noautorestart"),t("menu.restore.rollback"),t("menu.excluded"),t("menu.restore.cancelhint")),"restore",who -> { who.closeInventory(); plugin.requestRestore(who,id); });
+        m.put(15,Material.RED_CONCRETE,t("menu.delete"),List.of(t("menu.selected",id),t("menu.delete.direct"),t("menu.delete.files"),t("menu.delete.permanent"),t("menu.delete.pinned")),"delete",who -> { who.closeInventory(); plugin.delete(who,id); });
         m.put(22,Material.ARROW,t("menu.back"),List.of(),"list",who -> openList(who,page));
-        show(p,m);
-    }
-    private void restoreWarning(Player p, String id, int page) {
-        Menu m = make(p,t("menu.restore.warning"),27);
-        m.display(4,Material.TNT,t("menu.restore.warningtitle"),List.of(t("menu.selected",id),t("menu.noautorestart"),t("menu.excluded"),t("menu.norestart")));
-        m.put(11,Material.ORANGE_CONCRETE,t("menu.verify"),List.of(t("menu.verify.hint")),"restore",who -> {
-            who.closeInventory(); plugin.requestRestore(who,id,token -> restoreFinal(who,id,page));
-        });
-        m.put(15,Material.BARRIER,t("common.cancel"),List.of(),"gui",who -> openInfo(who,id,page));
-        show(p,m);
-    }
-    private void restoreFinal(Player p, String id, int page) {
-        Menu m = make(p,t("menu.restore.final"),27);
-        m.display(4,Material.REDSTONE_BLOCK,t("menu.restore.question",id),List.of(t("menu.restore.keepsrunning"),t("menu.restore.restart"),t("menu.expires",plugin.settings().confirmationSeconds())));
-        m.put(11,Material.LIME_CONCRETE,t("menu.restore.confirm"),List.of(t("menu.finalhint")),"restore",who -> { who.closeInventory(); plugin.confirmRestore(who,id); });
-        m.put(15,Material.BARRIER,t("menu.restore.cancel"),List.of(),"restore",who -> { plugin.cancelRestore(who); openInfo(who,id,page); });
-        show(p,m);
-    }
-    private void deleteWarning(Player p, String id, int page) {
-        Menu m = make(p,t("menu.delete.warning"),27);
-        m.display(4,Material.TNT,t("menu.delete.question",id),List.of(t("menu.delete.files"),t("menu.delete.permanent"),t("menu.delete.last"),t("menu.delete.zero"),t("menu.delete.norecovery"),t("menu.delete.pinned")));
-        m.put(11,Material.ORANGE_CONCRETE,t("menu.delete.continue"),List.of(),"delete",who -> { if (plugin.requestDelete(who,id)) deleteFinal(who,id,page); });
-        m.put(15,Material.BARRIER,t("common.cancel"),List.of(),"gui",who -> openInfo(who,id,page));
-        show(p,m);
-    }
-    void deleteFinal(Player p, String id, int page) {
-        Menu m = make(p,t("menu.delete.final"),27);
-        boolean warnLast = plugin.lastDeleteWarning(p,id);
-        m.display(4,Material.REDSTONE_BLOCK,id,List.of(t("menu.delete.noundo"),t("menu.delete.last"),t("menu.delete.zero"),t("menu.delete.norecovery"),t("menu.delete.pinned")));
-        m.put(11,Material.RED_CONCRETE,t(warnLast ? "menu.delete.confirm.last" : "menu.delete.confirm"),
-                warnLast ? List.of(t("menu.delete.zero"),t("menu.delete.norecovery")) : List.of(),
-                "delete",who -> { who.closeInventory(); plugin.delete(who,id); });
-        m.put(15,Material.BARRIER,t("common.cancel"),List.of(),"gui",who -> { plugin.cancelDelete(who,id); openInfo(who,id,page); });
         show(p,m);
     }
     private void openAutomatic(Player p) {

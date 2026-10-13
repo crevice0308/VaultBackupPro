@@ -190,8 +190,8 @@ public final class VerifyRelease {{
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--plugin", type=Path, default=ROOT / "build/libs/VaultBackupPro-1.1.0.jar")
-    parser.add_argument("--helper", type=Path, default=ROOT / "build/libs/vaultbackup-restore-1.1.0.jar")
+    parser.add_argument("--plugin", type=Path, default=ROOT / "build/libs/VaultBackupPro-1.2.0.jar")
+    parser.add_argument("--helper", type=Path, default=ROOT / "build/libs/vaultbackup-restore-1.2.0.jar")
     parser.add_argument("--plugin-mapping", type=Path, required=True)
     parser.add_argument("--helper-mapping", type=Path, required=True)
     parser.add_argument("--java-home", type=Path, default=Path(os.environ.get("JAVA_HOME", "")))

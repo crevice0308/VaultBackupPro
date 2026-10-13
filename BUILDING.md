@@ -7,16 +7,17 @@ Linux: `./gradlew clean release check`
 Windows: `gradlew.bat clean release check`
 
 ## 生成物
-- build/libs/VaultBackupPro-1.1.0.jar — 難読化したプラグイン。独立ヘルパーを内蔵
-- build/libs/vaultbackup-restore-1.1.0.jar — 難読化した独立復元ヘルパー
+- build/libs/VaultBackupPro-1.2.0.jar — 難読化したプラグイン。独立ヘルパーを内蔵
+- build/libs/vaultbackup-restore-1.2.0.jar — 難読化した独立復元ヘルパー
 
 この改訂では ProGuard 7.10.0 でシンボルを難読化します。縮小・最適化は行いません。公開ソースと .pro 設定からビルドできます。難読化はソースを秘匿するものではありません。API は compileOnly で、サーバー API や Minecraft/Spigot サーバー本体を JAR に同梱しません。JAR 内の順序・タイムスタンプは再現しやすい設定です。実際の配布物はテスト結果の SHA-256 と照合してください。
 
 ## 検証タスク
 - coreTest: 使い捨て ZIP・バックアップ・改ざん・保持制限の検証
+- startupTest: 起動時の古い予約・実ロック競合・取消・復旧状態の検証
 - restoreTest: 実際の子 JVM と配布ヘルパーを使う予約・取消競合・停止・復元・保護の検証
 - settingsTest: 設定、日本語/英語、メッセージ、バージョン判定の検証
-- deleteWorkflowTest: 最終削除の警告・再確認・取消・期限・予約保護の検証
+- deleteWorkflowTest: 直接削除・直接予約・権限再確認・取消・連打・予約保護の検証
 - lifecycleTest: 保存/停止アダプターの安全側失敗と呼出し条件の検証
 
 check は上記の独立 Java assertion harness を実行します。JUnit の test タスクは意図的に無効です。検証回数は TEST-RESULTS.md に実測値を記載します。

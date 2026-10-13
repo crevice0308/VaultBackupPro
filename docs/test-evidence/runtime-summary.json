@@ -1,0 +1,235 @@
+{
+  "release": "VaultBackup Pro 1.2.0",
+  "delivery_status": "Tested before publication; distributed as a prerelease",
+  "test_date_utc": "2026-10-13",
+  "java": "Temurin JDK 25.0.4.1+1",
+  "plugin_sha256": "598d17446beb71b56b58386edeaf3f51d9d943a71b0ac76c72dcc54d77550996",
+  "embedded_and_standalone_helper_sha256": "308511e9c2c7c7950c8e16181033182cbab342e834b37d1de686dc4257c096e2",
+  "primary_runtime": [
+    {
+      "server": "Paper",
+      "minecraft": "26.2",
+      "build": "133",
+      "upstream_channel": "stable",
+      "server_sha256": "bf1dcf627364f8a631ab15250d240eb5a8e89faaac523b391e1c61367fce9ff1",
+      "passed": true,
+      "check_count": 32,
+      "plugin_generated_default_sha256": "342a47c679b0e4fa9a703f6973b2e81efa900fda5c5e031c01931420df50e8ca",
+      "verified_archive_entries": 486,
+      "verified_uncompressed_bytes": 244248949,
+      "console_history_excluded": true,
+      "neighbouring_paper_version_history_retained": true,
+      "world_ticks_during_reserved_observation": 102,
+      "normal_stop_exit": 0,
+      "manual_restart_stop_exit": 0,
+      "helper_exit_confirmed_before_manual_restart": true
+    },
+    {
+      "server": "Paper",
+      "minecraft": "26.3",
+      "build": "179",
+      "upstream_channel": "stable",
+      "server_sha256": "5c208cf990315cff647b8e8b3d487b98c8be2f31655985ed004c7bb25b3857ce",
+      "passed": true,
+      "check_count": 32,
+      "plugin_generated_default_sha256": "342a47c679b0e4fa9a703f6973b2e81efa900fda5c5e031c01931420df50e8ca",
+      "verified_archive_entries": 486,
+      "verified_uncompressed_bytes": 232547058,
+      "console_history_excluded": true,
+      "neighbouring_paper_version_history_retained": true,
+      "world_ticks_during_reserved_observation": 101,
+      "normal_stop_exit": 0,
+      "manual_restart_stop_exit": 0,
+      "helper_exit_confirmed_before_manual_restart": true
+    },
+    {
+      "server": "Purpur",
+      "minecraft": "26.2",
+      "build": "2633",
+      "upstream_channel": "stable",
+      "server_sha256": "41f7c0535c1cec47ede48d25c8d9bd7f053d4dc44f87293e5a007314dbcfc32c",
+      "passed": true,
+      "check_count": 32,
+      "plugin_generated_default_sha256": "342a47c679b0e4fa9a703f6973b2e81efa900fda5c5e031c01931420df50e8ca",
+      "verified_archive_entries": 502,
+      "verified_uncompressed_bytes": 250226498,
+      "console_history_excluded": true,
+      "neighbouring_paper_version_history_retained": true,
+      "world_ticks_during_reserved_observation": 101,
+      "normal_stop_exit": 0,
+      "manual_restart_stop_exit": 0,
+      "helper_exit_confirmed_before_manual_restart": true
+    },
+    {
+      "server": "Purpur",
+      "minecraft": "26.3",
+      "build": "2648",
+      "upstream_channel": "experimental",
+      "server_sha256": "7e36f3b09d394307ae9a6a233f38a0564e8429c4c1141f468ac743220fb01a41",
+      "passed": true,
+      "check_count": 32,
+      "plugin_generated_default_sha256": "342a47c679b0e4fa9a703f6973b2e81efa900fda5c5e031c01931420df50e8ca",
+      "verified_archive_entries": 502,
+      "verified_uncompressed_bytes": 238470266,
+      "console_history_excluded": true,
+      "neighbouring_paper_version_history_retained": true,
+      "world_ticks_during_reserved_observation": 101,
+      "normal_stop_exit": 0,
+      "manual_restart_stop_exit": 0,
+      "helper_exit_confirmed_before_manual_restart": true
+    }
+  ],
+  "common_primary_checks": [
+    "fresh_plugin_generated_default_matches_frozen_resource",
+    "shipped_default_narrow_console_history_exclusion",
+    "frozen_1_2_0_enabled",
+    "japanese_default_help_status_zero_list",
+    "help_has_no_confirm_commands",
+    "immediate_create_acceptance_precedes_save_complete_and_final_result",
+    "busy_cached_list_and_status_remain_available",
+    "legacy_delete_confirm_rejected_without_deletion",
+    "legacy_restore_confirm_rejected_without_reservation",
+    "direct_delete_two_to_one",
+    "direct_delete_last_one_to_zero",
+    "tiny_byte_retention_removes_last_backup_to_zero",
+    "retention_reports_no_remaining_recovery_points",
+    "create_after_zero_succeeds",
+    "archive_crc_manifest_sha256_world_libraries_and_plugin_verified",
+    "console_history_excluded",
+    "neighbour_paper_version_history_retained",
+    "single_restore_command_reserves",
+    "duplicate_restore_refused",
+    "reserved_archive_delete_refused",
+    "creation_while_reserved_refused",
+    "help_status_list_available_while_reserved",
+    "cancel_keeps_server_running_and_files_unchanged",
+    "rereservation_after_cancel",
+    "world_and_jvm_still_running_after_reservation",
+    "no_stage_swap_or_success_before_manual_stop",
+    "manual_stop_actual_jvm_exit_then_offline_restore",
+    "mutation_preserved_in_rollback",
+    "no_automatic_restart",
+    "manual_restart_green_japanese_verified_success",
+    "receipt_consumed",
+    "restored_final_jar_hash_unchanged"
+  ],
+  "additional_runtime": [
+    {
+      "scenario": "English direct actions, reserved settings and real scheduled retention",
+      "passed": true,
+      "check_count": 16,
+      "checks": [
+        "reserved_auto_on_interval_change_allowed",
+        "reserved_language_reload_roundtrip_allowed",
+        "committed_helper_language_unchanged",
+        "reserved_storage_change_rejected",
+        "reserved_integrity_change_rejected",
+        "reserved_retention_change_rejected",
+        "real_one_minute_scheduled_backup_after_cancel",
+        "scheduled_acceptance_save_result_message_order",
+        "automatic_retention_to_zero_truthful",
+        "english_help",
+        "english_retention_zero_truthful",
+        "english_recreate",
+        "english_direct_reserve_cancel_rereserve",
+        "english_restore_after_manual_stop",
+        "english_green_verified_receipt",
+        "english_direct_last_delete_zero"
+      ],
+      "final_stop_exit": 0
+    },
+    {
+      "scenario": "Authenticated stale waiting job with dead helper",
+      "passed": true,
+      "check_count": 9,
+      "checks": [
+        "real_reservation_authenticated_helper_metadata",
+        "exact_waiting_helper_terminated_server_left_alive",
+        "graceful_original_server_stop_without_swap",
+        "stale_waiting_restart_reaches_ready",
+        "authenticated_cancellation_acknowledged_dead_helper",
+        "active_marker_cleared",
+        "mutated_current_data_retained",
+        "no_staging_rollback_receipt_or_hard_shutdown",
+        "plugin_status_and_list_available"
+      ],
+      "final_stop_exit": 0
+    }
+  ],
+  "workflow_acceptance_scenarios_passed": 6,
+  "workflow_check_count": 153,
+  "startup_conflict_observation": {
+    "server": "Paper 26.3 build 179",
+    "classification": "Observed limitation; not an acceptance pass or write-prevention certification",
+    "shutdown_was_requested": true,
+    "server_exit": 0,
+    "world_loading_observed": true,
+    "world_saving_observed": true,
+    "done_banner_observed": true,
+    "changed_world_files": [
+      "level.dat",
+      "level.dat_old"
+    ],
+    "concurrent_startup_during_restore_supported": false,
+    "required_operation": "Disable automatic restart. Stop manually after reservation. Wait for helper SUCCESS and actual helper exit. Only then restart manually."
+  },
+  "unavailable_scenarios": [
+    {
+      "scenario": "Deliberate SIGKILL without normal-stop authorization",
+      "runtime_tested": false,
+      "reason": "The authorized extras retry completed English tests, then automatic approval review was cancelled during crash-fixture preparation, before reservation or deliberate SIGKILL. No further retry was made."
+    }
+  ],
+  "unavailable_targets": [
+    {
+      "server": "Spigot",
+      "minecraft": "26.2",
+      "official_buildtools": "#201",
+      "runtime_tested": false
+    },
+    {
+      "server": "Spigot",
+      "minecraft": "26.3",
+      "official_buildtools": "#201",
+      "runtime_tested": false
+    }
+  ],
+  "spigot_blocker": "Official BuildTools checksum, source checkouts and Mojang mappings were verified; Maven/server generation was interrupted by proxy failures and automatic approval-review cancellation. No unofficial server binary was substituted.",
+  "fixture_controls": [
+    "Fresh disposable loopback-only flat worlds; offline authentication; no real players or user files",
+    "Primary scheduling disabled; empty-server pause disabled; view/simulation distance 2",
+    "Fresh plugin-generated config matched frozen resource before test-path changes",
+    "Shipped .paper/console_history exclusion used; neighbouring version history retained",
+    "Only added exclusion: plugins/spark/tmp/**; default cache exclusion removed to retain runtime cache/libraries for offline restore tests",
+    "English one-minute automatic scheduling was explicitly exercised, then disabled"
+  ],
+  "attempt_history": [
+    {
+      "plugin_sha256": "b2afe82df3ce74f287977d18e817e86573b211aa5d4c478919637341dc43c26d",
+      "classification": "superseded",
+      "detail": "Initial concurrent-console backups safely rejected changing console_history. A test-only exclusion allowed preliminary cycles; none count as final evidence."
+    },
+    {
+      "plugin_sha256": "d5a36479776807d1203bd29f72c53afdef11107e57b0396229e7131c8f3c6535",
+      "classification": "superseded",
+      "detail": "Default-exclusion revision passed preliminary Paper workflows and startup probes; superseded by immediate acceptance-message revision."
+    },
+    {
+      "plugin_sha256": "598d17446beb71b56b58386edeaf3f51d9d943a71b0ac76c72dcc54d77550996",
+      "classification": "infrastructure_interrupted_then_authorized_retry",
+      "detail": "Initial final primary/startup run and a separate English extras run were cancelled by automatic approval review. Active state/root ownership was reconciled; each affected operation was retried once on fresh fixtures. The extras retry completed English checks but was cancelled again before the deliberate crash test. Further extras retries stopped. Only completed final results above count."
+    }
+  ],
+  "untested": [
+    "Deliberate SIGKILL/crash-refusal runtime on the final JAR",
+    "Spigot 26.2/26.3 final runtime",
+    "Actual-player GUI interaction",
+    "Runtime player permission revocation mid-verification (source/unit evidence is separate)",
+    "Windows",
+    "Real webhook transmission",
+    "Production-scale load",
+    "Power loss",
+    "Supported concurrent startup/zero-write startup prevention"
+  ],
+  "raw_evidence": "Preserved outside the distributable source; no raw logs, absolute workspace paths, PIDs or restore-job identifiers included here."
+}

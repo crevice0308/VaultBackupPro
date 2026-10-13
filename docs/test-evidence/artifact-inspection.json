@@ -1,21 +1,21 @@
 {
   "plugin": {
-    "file": "VaultBackupPro-1.1.0.jar",
-    "sha256": "54b356a6d7a4ccf5a8e2b62b8d556b033c1c76f8cfe7910e19f95c34328e177b",
-    "bytes": 242619,
-    "classes": 41,
-    "renamed_classes": 38,
+    "file": "VaultBackupPro-1.2.0.jar",
+    "sha256": "598d17446beb71b56b58386edeaf3f51d9d943a71b0ac76c72dcc54d77550996",
+    "bytes": 252250,
+    "classes": 42,
+    "renamed_classes": 39,
     "java_class_major": 69,
-    "jvm_probe": "VERIFIED classes=41 records=19 enums=1 recordRoundTrips=3"
+    "jvm_probe": "VERIFIED classes=42 records=18 enums=2 recordRoundTrips=3"
   },
   "helper": {
-    "file": "vaultbackup-restore-1.1.0.jar",
-    "sha256": "a2f17d2d2b9b08ae7bea40ec8aec4391fb7f38ddf9c711720c6aa645e5e73a4f",
-    "bytes": 92617,
-    "classes": 27,
-    "renamed_classes": 25,
+    "file": "vaultbackup-restore-1.2.0.jar",
+    "sha256": "308511e9c2c7c7950c8e16181033182cbab342e834b37d1de686dc4257c096e2",
+    "bytes": 99378,
+    "classes": 30,
+    "renamed_classes": 28,
     "java_class_major": 69,
-    "jvm_probe": "VERIFIED classes=27 records=15 enums=1 recordRoundTrips=3",
+    "jvm_probe": "VERIFIED classes=30 records=16 enums=2 recordRoundTrips=3",
     "no_argument_exit": 2
   },
   "embedded_helper_identical": true,

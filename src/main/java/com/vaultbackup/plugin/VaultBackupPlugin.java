@@ -2,7 +2,6 @@
 package com.vaultbackup.plugin;
 
 import com.vaultbackup.core.BackupEngine;
-import com.vaultbackup.core.BackupDeletionRefusedException;
 import com.vaultbackup.core.BackupRecord;
 import com.vaultbackup.restore.RestoreCoordinator;
 import org.bukkit.ChatColor;
@@ -26,7 +25,6 @@ import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Consumer;
 import java.util.logging.Level;
 
 /** Bukkit is used only on the primary server thread; archive/helper I/O uses one bounded worker. */
@@ -51,8 +49,6 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
     private volatile long freeSpace;
     private Instant nextAutomatic;
     private final Map<UUID, Boolean> autosave = new LinkedHashMap<>();
-    private final Map<String, PendingRestore> pendingRestores = new HashMap<>();
-    private final Map<String, DeleteConfirmation> pendingDeletes = new HashMap<>();
     private volatile boolean snapshotActive;
     private volatile String armedJob;
     private boolean restoreGuardStartupFailure;
@@ -63,13 +59,21 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             settings = PluginSettings.read(getDataFolder().toPath().resolve("config.yml"));
             if (!supported()) { getServer().getPluginManager().disablePlugin(this); return; }
             ServerLifecycle.configureLanguage(language());
-            createPrivateDirectories(settings.backupDirectory());
-            createPrivateDirectories(settings.stateDirectory());
-            engine = new BackupEngine(settings.options());
-            // Journal and authenticated receipt validation are one startup safety boundary.
-            // Any failure here requests shutdown rather than enabling world startup with unknown restore state.
+            // Acquire the lifetime root guard before opening the engine or requiring the root.
             restoreGuardStartupFailure = true;
-            restores = new RestoreCoordinator(settings.serverRoot(), settings.backupDirectory(), settings.stateDirectory(), settings.helperJar(), helperLanguage());
+            RestoreCoordinator.StartupResult startup = RestoreCoordinator.start(settings.serverRoot(),
+                    settings.backupDirectory(), settings.stateDirectory(), settings.helperJar(), helperLanguage(),
+                    message -> getLogger().info(text("restore.helpermessage",message)));
+            restores = startup.coordinator();
+            if (startup.disposition() == RestoreCoordinator.StartupDisposition.HARD_CONFLICT)
+                throw new IOException(startup.message());
+            if (startup.disposition() == RestoreCoordinator.StartupDisposition.GUARDED_DEGRADED) {
+                restoreGuardStartupFailure = false;
+                getLogger().warning(text("startup.degraded"));
+                getLogger().warning(text("job.diagnostic",startup.message()));
+                getServer().getPluginManager().disablePlugin(this);
+                return;
+            }
             restores.startupFailure().ifPresent(message -> {
                 tell(Bukkit.getConsoleSender(), text("startup.restorefailed"), false);
                 getLogger().warning(text("job.diagnostic", message));
@@ -77,8 +81,9 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             restores.consumeVerifiedReceipt().ifPresent(receipt -> tell(Bukkit.getConsoleSender(),
                     "\n========================================\n" + text("startup.success", receipt.backupId(), receipt.jobId(),
                             receipt.completedAt(), receipt.rollbackDirectory()) + "\n========================================", true));
-            ServerLifecycle.verifyCompatibility();
             restoreGuardStartupFailure = false;
+            ServerLifecycle.verifyCompatibility();
+            engine = new BackupEngine(settings.options());
             installHelper();
             io = Executors.newSingleThreadExecutor(r -> { Thread t = new Thread(r, "VaultBackup-IO"); t.setDaemon(true); return t; });
             notifier = new DiscordNotifier(getLogger());
@@ -207,12 +212,10 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         return settings.stateDirectory().resolve("restore-jobs").resolve(armedJob == null ? "" : armedJob);
     }
     private boolean protectedBackup(String id) {
-        return (restoreStatus != null && restoreStatus.backupId().equals(id))
-                || pendingRestores.values().stream().anyMatch(p -> p.id.equals(id));
+        return restoreStatus != null && restoreStatus.backupId().equals(id);
     }
     long freeSpace() { return freeSpace; }
     Instant nextAutomatic() { return nextAutomatic; }
-    static String actor(CommandSender sender) { return sender instanceof Player p ? p.getUniqueId().toString() : "console:" + sender.getName(); }
     static String humanBytes(long bytes) {
         if (bytes < 1024) return bytes + " B";
         String[] units = {"KiB","MiB","GiB","TiB","PiB"};
@@ -260,9 +263,9 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
 
     void create(CommandSender sender, String label) {
         if (sender != null && !allowed(sender, "create")) return;
-        expirePending();
-        if (!pendingRestores.isEmpty() || restoreReserved()) { tell(sender, text("backup.blocked"), false); return; }
+        if (restoreReserved()) { tell(sender, text("backup.blocked"), false); return; }
         if (!begin(sender, "operation.create")) return;
+        tell(sender, text("backup.starting"), true);
         try {
             snapshotActive = true;
             for (World world : Bukkit.getWorlds()) {
@@ -280,15 +283,40 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             try {
                 BackupRecord record = engine.createBackup(label, this::isCancelled, p -> progress = p);
                 main(this::restoreAutosave);
-                main(() -> tell(sender, text("backup.created", record.id(), humanBytes(record.compressedBytes())), true));
-                notifier.send(jobSettings, text("backup.created.notify", record.id()));
                 try {
                     engine.retain(jobSettings.retentionCount() == 0 ? Integer.MAX_VALUE : jobSettings.retentionCount(), jobSettings.retentionBytes() == 0 ? Long.MAX_VALUE : jobSettings.retentionBytes(), restores.protectedBackupIds(), this::isCancelled, p -> progress = p);
-                    updateCatalogue();
                 } catch (Exception error) { reportFailure(sender, "job.retention", error); }
+                // A failed delete/fsync may already have withdrawn the archive's commit marker.
+                // Reconcile the resulting store even after retention failure; never equate the
+                // earlier successful creation with a presently usable recovery point.
+                reportBackupOutcome(sender, record, jobSettings);
             } catch (Exception error) { reportFailure(sender, "job.backup", error); }
             finally { main(() -> { restoreAutosave(); finish(); }); }
         });
+    }
+
+    private void reportBackupOutcome(CommandSender sender, BackupRecord created, PluginSettings jobSettings) {
+        List<BackupRecord> remaining;
+        try {
+            remaining = List.copyOf(engine.listBackups());
+            catalogue = remaining;
+        } catch (Exception error) {
+            String outcome = text("backup.outcomeunknown",created.id());
+            main(() -> tell(sender,outcome,false));
+            reportFailure(sender,"job.retention",error);
+            if (notifier != null) notifier.send(jobSettings,outcome);
+            return;
+        }
+        boolean retained = remaining.stream().anyMatch(record -> record.id().equals(created.id()));
+        boolean removed = Files.notExists(created.zipPath(),LinkOption.NOFOLLOW_LINKS)
+                && Files.notExists(created.metadataPath(),LinkOption.NOFOLLOW_LINKS);
+        String outcome = retained ? text("backup.created",created.id(),humanBytes(created.compressedBytes()))
+                : text(removed ? "backup.retentionremoved" : "backup.unavailable",created.id());
+        String summary = remaining.isEmpty() ? text("backup.retentionempty") : text("backup.retentioncount",remaining.size());
+        main(() -> { tell(sender,outcome,retained); tell(sender,summary,!remaining.isEmpty()); });
+        if (notifier != null) notifier.send(jobSettings,outcome + " " + summary);
+        try { freeSpace = Files.getFileStore(settings.backupDirectory()).getUsableSpace(); }
+        catch (IOException error) { reportFailure(sender,"job.list",error); }
     }
 
     private void restoreAutosave() {
@@ -308,6 +336,12 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
     }
     void refresh(CommandSender sender, Runnable after) {
         if (sender != null && !allowed(sender, "list")) return;
+        if (busy()) {
+            // Read-only navigation remains available while the I/O worker owns a mutation.
+            if (sender != null) tell(sender,text("list.cached"),true);
+            if (after != null) after.run();
+            return;
+        }
         if (!begin(sender, "operation.catalogue")) return;
         submit(() -> { try { updateCatalogue(); main(() -> { if (after != null) after.run(); }); }
             catch (Exception error) { reportFailure(sender, "job.list", error); }
@@ -315,68 +349,76 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
     }
     Optional<BackupRecord> find(String id) { return catalogue.stream().filter(record -> record.id().equals(id)).findFirst(); }
 
-    void requestRestore(CommandSender sender, String id, Consumer<String> reserved) {
+    /** One explicit administrator action verifies and reserves; it never stops the server. */
+    void requestRestore(CommandSender sender, String id) {
         if (!allowed(sender,"restore")) return;
         if (busy()) { tell(sender,text("job.busy",operation()),false); return; }
-        expirePending();
-        if (!pendingRestores.isEmpty() || restoreReserved()) { tell(sender,text("restore.pending"),false); return; }
+        if (restoreReserved()) { tell(sender,text("restore.pending"),false); return; }
         Optional<BackupRecord> selected = find(id);
         if (selected.isEmpty()) { tell(sender,text("list.unknown"),false); return; }
         if (!Files.isRegularFile(settings.helperJar())) { tell(sender,text("restore.helpermissing"),false); return; }
         if (!begin(sender,"operation.verify")) return;
         BackupRecord record = selected.get();
-        submit(() -> { try {
+        tell(sender,text("restore.verifying",id),true);
+        submit(() -> {
+            String preparedToken = null;
+            try {
                 engine.verify(id, this::isCancelled, p -> progress = p);
-                RestoreCoordinator.Reservation reservation = restores.reserve(id, record.zipPath(), record.sha256(), Duration.ofSeconds(settings.confirmationSeconds()));
+                if (isCancelled()) { main(this::finish); return; }
+                restores.setLanguage(helperLanguage());
+                RestoreCoordinator.Reservation reservation = restores.reserve(record.id(), record.zipPath(),
+                        record.sha256(), Duration.ofSeconds(settings.confirmationSeconds()));
+                preparedToken = reservation.token();
+                String token = preparedToken;
                 main(() -> {
-                    pendingRestores.put(actor(sender), new PendingRestore(id, reservation.token(), reservation.expiresAt()));
-                    tell(sender,text("restore.preview", id, settings.confirmationSeconds()),false);
-                    if (reserved != null) reserved.accept(reservation.token());
+                    // Verification can be slow. Recheck permission and connection on the server
+                    // thread immediately before committing this explicit action.
+                    if (isCancelled() || sender instanceof Player p && !p.isOnline()) {
+                        restores.cancel(token); finish(); return;
+                    }
+                    if (!allowed(sender,"restore")) { restores.cancel(token); finish(); return; }
+                    operation = "operation.reserve";
+                    submit(() -> commitVerifiedRestore(sender, record.id(), token));
                 });
-            } catch (Exception error) { reportFailure(sender,"job.restoreprepare",error); }
-            finally { main(this::finish); }
+            } catch (Exception error) {
+                if (preparedToken != null) restores.cancel(preparedToken);
+                if (!isCancelled()) reportFailure(sender,"job.restoreprepare",error);
+                main(this::finish);
+            }
         });
     }
 
-    void confirmRestore(CommandSender sender, String id) {
-        if (!allowed(sender,"restore")) return;
-        expirePending();
-        PendingRestore pending = pendingRestores.get(actor(sender));
-        if (pending == null || !pending.id.equals(id)) { tell(sender,text("restore.noconfirmation"),false); return; }
-        if (!begin(sender,"operation.reserve")) return;
-        pendingRestores.remove(actor(sender));
-        submit(() -> {
-            try {
-                RestoreCoordinator.LaunchResult result = restores.confirm(pending.token);
-                armedJob = result.jobId();
-                refreshRestoreState();
-                main(() -> {
-                    tell(sender,text(result.helperReady() ? "restore.reserved" : restoreReserved() ? "restore.notready" : "restore.notready.cleared", id),result.helperReady());
-                    if (result.helperReady()) {
-                        tell(sender,text("restore.cancelhint"),true);
-                        tell(sender,text("restore.shutdowncaveat"),false);
-                    }
-                    showRestorePaths(sender, result.jobFile().getParent());
-                    if (result.helperReady()) tell(sender,text("restore.restart"),true);
-                });
-            } catch (Exception error) {
-                restoreStatusUncertain = true;
-                try { refreshRestoreState(); } catch (IOException ignored) { /* keep unsafe state visible */ }
-                reportFailure(sender,"job.restorelaunch",error);
-            } finally { main(this::finish); }
-        });
+    private void commitVerifiedRestore(CommandSender sender, String id, String token) {
+        try {
+            if (isCancelled()) { restores.cancel(token); return; }
+            RestoreCoordinator.LaunchResult result = restores.confirm(token);
+            armedJob = result.jobId();
+            refreshRestoreState();
+            main(() -> {
+                tell(sender,text(result.helperReady() ? "restore.reserved" : restoreReserved() ? "restore.notready" : "restore.notready.cleared", id),result.helperReady());
+                if (result.helperReady()) {
+                    tell(sender,text("restore.cancelhint"),true);
+                    tell(sender,text("restore.shutdowncaveat"),false);
+                }
+                showRestorePaths(sender, result.jobFile().getParent());
+                if (result.helperReady()) tell(sender,text("restore.restart"),true);
+            });
+        } catch (Exception error) {
+            restores.cancel(token);
+            restoreStatusUncertain = true;
+            try { refreshRestoreState(); } catch (IOException ignored) { /* keep unsafe state visible */ }
+            reportFailure(sender,"job.restorelaunch",error);
+        } finally { main(this::finish); }
     }
 
     void cancelRestore(CommandSender sender) {
         if (!allowed(sender,"restore")) return;
-        if (busy()) { tell(sender,text("job.busy",operation()),false); return; }
-        PendingRestore pending = pendingRestores.get(actor(sender));
-        if (pending != null) {
-            restores.cancel(pending.token);
-            pendingRestores.remove(actor(sender));
-            tell(sender,text("restore.cancelled.pending"),true);
+        if (busy() && operation.equals("operation.verify")) {
+            cancelled.set(true);
+            tell(sender,text("restore.verificationcancelled"),true);
             return;
         }
+        if (busy()) { tell(sender,text("job.busy",operation()),false); return; }
         if (!restoreReserved()) { tell(sender,text("restore.nocancel"),false); return; }
         if (!begin(sender,"operation.cancel")) return;
         submit(() -> {
@@ -419,67 +461,27 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         tell(sender,text("restore.statusfile", directory.resolve("status.properties")),true);
     }
 
-    private void expirePending() {
-        Instant now = Instant.now();
-        pendingRestores.entrySet().removeIf(entry -> {
-            if (entry.getValue().expires.isAfter(now)) return false;
-            try { restores.cancel(entry.getValue().token); } catch (Exception e) { getLogger().warning(text("restore.expired")); }
-            return true;
-        });
-        pendingDeletes.entrySet().removeIf(entry -> !entry.getValue().expires().isAfter(now));
-    }
-    boolean requestDelete(CommandSender sender, String id) {
-        if (!allowed(sender,"delete")) return false;
-        pendingDeletes.remove(actor(sender));
-        if (busy()) { tell(sender,text("job.busy",operation()),false); return false; }
-        if (find(id).isEmpty()) { tell(sender,text("list.unknown"),false); return false; }
-        if (protectedBackup(id)) { tell(sender,text("delete.protected"),false); return false; }
-        boolean warnLast = DeleteConfirmation.needsLastBackupWarning(catalogue, id);
-        if (warnLast) tell(sender,text("delete.last.warning"),false);
-        pendingDeletes.put(actor(sender), new DeleteConfirmation(id,
-                Instant.now().plusSeconds(settings.confirmationSeconds()), warnLast));
-        tell(sender,text("delete.preview", id, settings.confirmationSeconds()),false);
-        return true;
-    }
-    boolean lastDeleteWarning(CommandSender sender, String id) {
-        DeleteConfirmation pending = pendingDeletes.get(actor(sender));
-        return pending != null && pending.matches(id, Instant.now()) && pending.lastBackupWarning();
-    }
-    void cancelDelete(CommandSender sender, String id) {
-        DeleteConfirmation pending = pendingDeletes.get(actor(sender));
-        if (pending != null && pending.id().equals(id)) pendingDeletes.remove(actor(sender));
-        tell(sender,text("delete.cancelled"),true);
-    }
+    /** Explicit target action. The engine rechecks archive integrity and restore protection under lock. */
     void delete(CommandSender sender, String id) {
         if (!allowed(sender,"delete")) return;
-        expirePending();
-        DeleteConfirmation pending = pendingDeletes.get(actor(sender));
-        if (pending == null || !pending.matches(id, Instant.now())) { tell(sender,text("delete.request", id),false); return; }
+        if (busy()) { tell(sender,text("job.busy",operation()),false); return; }
+        if (find(id).isEmpty()) { tell(sender,text("list.unknown"),false); return; }
         if (protectedBackup(id)) { tell(sender,text("delete.protected"),false); return; }
         if (!begin(sender,"operation.delete")) return;
-        pendingDeletes.remove(actor(sender));
-        submit(() -> { try { engine.delete(id, restores.protectedBackupIds(), pending.lastBackupWarning()); updateCatalogue();
-                boolean noneRemain = catalogue.isEmpty();
-                main(() -> { tell(sender,text("delete.done", id),true);
-                    if (noneRemain) tell(sender,text("delete.noneleft"),false);
-                    if (sender instanceof Player p) menus.openList(p,0); });
+        submit(() -> {
+            try {
+                if (isCancelled()) return;
+                engine.delete(id, restores.protectedBackupIds());
+                updateCatalogue();
+                main(() -> {
+                    tell(sender,text("delete.done", id),true);
+                    if (sender instanceof Player p && p.isOnline()) menus.openList(p,0);
+                });
             } catch (Exception error) {
-                DeleteFeedback.report(error, reason -> main(() -> {
-                    // A disconnected player cannot receive this new warning. Do not leave
-                    // a warned token that could be consumed after reconnecting.
-                    if (sender instanceof Player p && !p.isOnline()) return;
-                    tell(sender,text(DeleteFeedback.messageKey(reason)),false);
-                    if (reason == BackupDeletionRefusedException.Reason.LAST_GOOD_CONFIRMATION_REQUIRED) {
-                        // An ordinary preview became stale. No deletion occurred. Record a NEW
-                        // warned confirmation; never retry deletion automatically with consent.
-                        tell(sender,text("delete.last.warning"),false);
-                        pendingDeletes.put(actor(sender), new DeleteConfirmation(id,
-                                Instant.now().plusSeconds(settings.confirmationSeconds()), true));
-                        tell(sender,text("delete.preview", id, settings.confirmationSeconds()),false);
-                        if (sender instanceof Player p) menus.deleteFinal(p,id,0);
-                    }
-                }), unexpected -> reportFailure(sender,"job.delete",unexpected));
-            } finally { main(this::finish); } });
+                DeleteFeedback.report(error, reason -> main(() -> tell(sender,text(DeleteFeedback.messageKey(reason)),false)),
+                        unexpected -> reportFailure(sender,"job.delete",unexpected));
+            } finally { main(this::finish); }
+        });
     }
 
     void reloadSettings(CommandSender sender) {
@@ -491,8 +493,7 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         changeSettings(sender,key,value);
     }
     private void changeSettings(CommandSender sender, String key, Object value) {
-        expirePending();
-        if (busy() || !pendingRestores.isEmpty() || restoreReserved()) { tell(sender,text("settings.blocked"),false); return; }
+        if (busy()) { tell(sender,text("settings.blocked"),false); return; }
         Path file = getDataFolder().toPath().resolve("config.yml");
         try {
             YamlConfiguration yaml = new YamlConfiguration(); yaml.load(file.toFile());
@@ -501,17 +502,30 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             if (!candidate.serverRoot().equals(settings.serverRoot()) || !candidate.backupDirectory().equals(settings.backupDirectory())
                     || !candidate.stateDirectory().equals(settings.stateDirectory()) || !candidate.helperJar().equals(settings.helperJar()))
                 throw new IllegalArgumentException(text("settings.restart"));
-            BackupEngine candidateEngine = new BackupEngine(candidate.options());
+            boolean reserved = restoreReserved();
+            if (reserved && !safeReservedSettings(settings, candidate))
+                throw new IllegalArgumentException(text("settings.reserved"));
+            BackupEngine candidateEngine = reserved ? engine : new BackupEngine(candidate.options());
             if (key != null) {
                 Path temp = Files.createTempFile(file.getParent(), ".config-", ".tmp");
                 try { Files.writeString(temp,yaml.saveToString()); Files.move(temp,file,StandardCopyOption.ATOMIC_MOVE,StandardCopyOption.REPLACE_EXISTING); }
                 finally { Files.deleteIfExists(temp); }
             }
-            restores.setLanguage(candidate.language().equals("en_US") ? "en" : "ja");
+            // An already committed helper retains the language stored in its immutable job.
+            if (!reserved) restores.setLanguage(candidate.language().equals("en_US") ? "en" : "ja");
             settings = candidate; engine = candidateEngine; ServerLifecycle.configureLanguage(language()); reschedule();
             tell(sender,key == null ? text("settings.reloaded") : text("settings.updated", key),true);
         } catch (Exception error) { tell(sender,text("settings.rejected", safeError(error)),false); }
     }
+    static boolean safeReservedSettings(PluginSettings current, PluginSettings candidate) {
+        return candidate.equals(new PluginSettings(current.serverRoot(), current.backupDirectory(),
+                current.stateDirectory(), current.helperJar(), current.includes(), current.excludes(),
+                candidate.automatic(), candidate.intervalMinutes(), current.retentionCount(),
+                current.retentionBytes(), current.compressionLevel(), current.maxEntries(), current.maxEntryBytes(),
+                current.maxTotalBytes(), current.maxCompressionRatio(), current.confirmationSeconds(),
+                current.discordEnabled(), current.webhook(), candidate.language()));
+    }
+
     private void reschedule() {
         if (automaticTask != null) automaticTask.cancel();
         nextAutomatic = null;
@@ -538,5 +552,4 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             tell(sender,text("restore.restart"),true);
         }
     }
-    private record PendingRestore(String id, String token, Instant expires) {}
 }

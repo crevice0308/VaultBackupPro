@@ -47,14 +47,12 @@ final class BackupCommands implements CommandExecutor, TabCompleter {
                 }
                 case "restore" -> {
                     if (args.length == 2 && args[1].equalsIgnoreCase("cancel")) plugin.cancelRestore(sender);
-                    else if (args.length == 2) plugin.requestRestore(sender,args[1],null);
-                    else if (args.length == 3 && args[2].equalsIgnoreCase("confirm")) plugin.confirmRestore(sender,args[1]);
-                    else throw invalid("command.usage", "/backup restore <id> [confirm] | /backup restore cancel");
+                    else if (args.length == 2) plugin.requestRestore(sender,args[1]);
+                    else throw invalid("command.usage", "/backup restore <id> | /backup restore cancel");
                 }
                 case "delete" -> {
-                    if (args.length == 2) plugin.requestDelete(sender,args[1]);
-                    else if (args.length == 3 && args[2].equalsIgnoreCase("confirm")) plugin.delete(sender,args[1]);
-                    else throw invalid("command.usage", "/backup delete <id> [confirm]");
+                    if (args.length == 2) plugin.delete(sender,args[1]);
+                    else throw invalid("command.usage", "/backup delete <id>");
                 }
                 case "status" -> { exact(args,1,"/backup status"); plugin.status(sender); }
                 case "reload" -> { exact(args,1,"/backup reload"); plugin.reloadSettings(sender); }
@@ -111,8 +109,7 @@ final class BackupCommands implements CommandExecutor, TabCompleter {
                 if (sub.equals("interval")) choices.addAll(List.of("5","15","30","60","180","360","720","1440"));
                 if (sub.equals("retention")) choices.addAll(List.of("count","bytes"));
             }
-        } else if (args.length == 3 && (args[0].equalsIgnoreCase("restore") || args[0].equalsIgnoreCase("delete"))
-                && sender.hasPermission("vaultbackup."+args[0].toLowerCase(Locale.ROOT))) choices.add("confirm");
+        }
         String prefix = args[args.length-1].toLowerCase(Locale.ROOT);
         return choices.stream().filter(s -> s.toLowerCase(Locale.ROOT).startsWith(prefix)).limit(100).toList();
     }

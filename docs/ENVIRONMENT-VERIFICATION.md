@@ -2,6 +2,8 @@
 
 Checked against publisher documentation, live Maven metadata, and publisher download APIs on **2026-10-13 UTC**. Availability verification is not a runtime compatibility test. Exact builds below were current when checked; dynamic documentation and Javadocs may lag the download APIs.
 
+For this 1.2.0 revision, the actual Paper 26.3 runtime target is build **179**, SHA-256 `5c208cf990315cff647b8e8b3d487b98c8be2f31655985ed004c7bb25b3857ce`. The original dependency/provenance research below includes build 178 and does not imply a 1.2.0 runtime test of it. Spigot runtime preparation was blocked; see SPIGOT-COMPATIBILITY.md.
+
 ## Minecraft, Java, and target builds
 
 - Minecraft Java **26.2** was released on June 16, 2026: [Mojang release announcement](https://www.minecraft.net/en-us/article/minecraft-java-edition-26-2).

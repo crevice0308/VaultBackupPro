@@ -141,15 +141,20 @@ final class RestoreFiles {
         }
         Properties p = new Properties(); p.setProperty("status", status); p.setProperty("updatedAt", Instant.now().toString());
         p.setProperty("message", message == null ? "" : message); write(jobDir.resolve("status.properties"), p);
-        System.out.println("[VaultBackupPro restore] "+status+": "+p.getProperty("message"));
     }
     static String status(Path jobDir) throws IOException {
         Path path = jobDir.resolve("status.properties");
-        return Files.exists(path, NOFOLLOW) ? required(load(path), "status") : "COMMITTED";
+        return required(load(path), "status");
     }
     static String receiptPayload(Properties p) throws IOException {
         return String.join("\n", required(p,"jobId"), required(p,"backupId"), required(p,"serverRoot"),
                 required(p,"archiveSha256"), required(p,"manifestSha256"), required(p,"completedAt"), required(p,"rollbackDirectory"));
+    }
+    static String recoveryPayload(Properties p)throws IOException {
+        return String.join("\n",required(p,"formatVersion"),required(p,"jobId"),required(p,"backupId"),
+                required(p,"serverRoot"),required(p,"archiveSha256"),required(p,"manifestSha256"),
+                required(p,"stage"),required(p,"rollback"),required(p,"failed"),
+                required(p,"outcome"),required(p,"completedAt"));
     }
     static void requireDeadParent(Properties job) throws IOException {
         long pid;

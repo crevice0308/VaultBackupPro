@@ -27,6 +27,8 @@ docs/RUNTIME-TEST-RESULTS.md
 docs/SECURITY-REVIEW.md
 docs/SPIGOT-COMPATIBILITY.md
 docs/test-evidence/artifact-inspection.json
+docs/test-evidence/build-validation.json
+docs/test-evidence/runtime-summary.json
 gradle.properties
 gradle/verification-metadata.xml
 gradle/wrapper/gradle-wrapper.jar
@@ -48,7 +50,6 @@ src/main/java/com/vaultbackup/core/BackupOptions.java
 src/main/java/com/vaultbackup/core/BackupRecord.java
 src/main/java/com/vaultbackup/plugin/BackupCommands.java
 src/main/java/com/vaultbackup/plugin/BackupMenus.java
-src/main/java/com/vaultbackup/plugin/DeleteConfirmation.java
 src/main/java/com/vaultbackup/plugin/DeleteFeedback.java
 src/main/java/com/vaultbackup/plugin/DiscordNotifier.java
 src/main/java/com/vaultbackup/plugin/Messages.java
@@ -61,6 +62,7 @@ src/main/java/com/vaultbackup/restore/RestoreCoordinator.java
 src/main/java/com/vaultbackup/restore/RestoreFiles.java
 src/main/java/com/vaultbackup/restore/RestoreJobState.java
 src/main/java/com/vaultbackup/restore/RestoreMain.java
+src/main/java/com/vaultbackup/restore/RestoreRootLease.java
 src/main/resources/config.yml
 src/main/resources/messages/en_US.properties
 src/main/resources/messages/ja_JP.properties
@@ -71,6 +73,7 @@ src/test/java/com/vaultbackup/plugin/DeleteWorkflowTest.java
 src/test/java/com/vaultbackup/plugin/PluginSettingsTest.java
 src/test/java/com/vaultbackup/plugin/ServerLifecycleProbe.java
 src/test/java/com/vaultbackup/restore/RestoreSafetyTest.java
+src/test/java/com/vaultbackup/restore/RestoreStartupTest.java
 third-party/Gradle-LICENSE.txt
 third-party/Gradle-NOTICE.txt
 third-party/Spigot-API-LICENCE.txt
@@ -78,10 +81,15 @@ tools/check_obfuscated_release.py
 tools/package_release.py
 tools/runtime-tests/CONFIRMED-DELETE-README.md
 tools/runtime-tests/README.md
+tools/runtime-tests/baseline_init.py
 tools/runtime-tests/confirmed_delete_harness.py
+tools/runtime-tests/direct_harness.py
 tools/runtime-tests/manualstop-message-patterns.json
 tools/runtime-tests/manualstop_harness.py
 tools/runtime-tests/prepare_disposable_baselines.py
 tools/runtime-tests/test_confirmed_last_deletion.py
+tools/runtime-tests/test_direct_actions.py
+tools/runtime-tests/test_direct_extras.py
 tools/runtime-tests/test_manualstop_crash.py
 tools/runtime-tests/test_manualstop_revision.py
+tools/runtime-tests/test_startup_boundaries.py

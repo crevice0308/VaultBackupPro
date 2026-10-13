@@ -16,7 +16,6 @@ final class DeleteFeedback {
 
     static String messageKey(BackupDeletionRefusedException.Reason reason) {
         return switch (reason) {
-            case LAST_GOOD_CONFIRMATION_REQUIRED -> "delete.last.changed";
             case RESTORE_PROTECTED -> "delete.protected";
         };
     }

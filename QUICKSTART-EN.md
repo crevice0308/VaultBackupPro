@@ -1,47 +1,19 @@
-# VaultBackup Pro 1.1.0 — Quick start
+# VaultBackup Pro 1.2.0 — Quick start
 
-Free software under GPL-3.0-only. The default JAR is not obfuscated. The accompanying source ZIP contains the corresponding source, Gradle build, tests and documentation. The plugin filename is VaultBackupPro-1.1.0.jar. Identify this exact release by its SHA-256 in TEST-RESULTS.md; do not rely on a filename alone to identify a binary. See [publication notes](PUBLICATION-NOTES.md) for source and artifact names.
+Install one VaultBackupPro-1.2.0.jar in plugins while the server is stopped. Do not extract the JAR or keep another VaultBackup version beside it. Use Java25 and a tested Paper, Purpur or Spigot26.2/26.3 build. Read TEST-RESULTS.md for exact versions and untested platforms.
 
-## Install or update
+Japanese is the default. Set language: en_US in plugins/VaultBackupPro/config.yml and use /backup reload for English. Existing configurations are preserved. A helper for an already-reserved restore keeps the language recorded when that job was created.
 
-1. Stop your server normally and wait for its Java process to exit. Keep your existing JAR and configuration separately.
-2. Copy the packaged VaultBackupPro-1.1.0.jar into plugins. Keep only one VaultBackup Pro JAR there. Do not unzip the JAR itself or create a directory named with the .jar extension.
-3. Run Paper, Purpur or Spigot 26.2/26.3 with Java 25. Exact tested builds are listed in the test reports; Purpur 26.3 is experimental upstream. Folia and unrelated versions are unsupported.
-4. Backups and restore control state must be outside the server root on a suitable local filesystem. The host must allow the independent Java helper. Configuration mistakes fail closed.
+Create: /backup create optional-label. List: /backup list. Status: /backup status. The /backup GUI provides the same administrator actions.
 
-Japanese is the default, including when an older config has no language key. To use English, set `language: en_US` in plugins/VaultBackupPro/config.yml, then run `/backup reload` while idle with no pending/confirmed restore. Set `language: ja_JP` to switch back. Existing configuration is not overwritten. Command names and permissions do not change with language.
+Delete: /backup delete <id> immediately deletes the target without another confirmation. This is irreversible, including the final backup. Automatic retention may also remove the final archive to satisfy a positive capacity limit. A retention count/byte value of0 disables that limit; it does not request deletion of everything. Keep independent recovery copies.
 
-## Back up and reserve a restore
+Restore: /backup restore <id> verifies the archive and directly reserves it for your next normal server stop. There is no second confirm command. Keep playing until you are ready, then perform a normal stop. Disable host auto-restart. Wait for the helper's SUCCESS, its process exit, and the recorded result before manually starting the server. /backup restore cancel cancels a reservation before application; wait for the acknowledged cancellation message. Do not interpret CANCEL_PENDING as completed cancellation.
 
-- `/backup` opens the administrator inventory GUI; console receives help.
-- `/backup create` creates a full-root ZIP after the controlled save step.
-- `/backup list` lists verified backups; `/backup status` shows current work and restore state.
-- Restore and deletion both require explicit confirmation. Keep independent backups and rehearse on disposable data first.
+The helper log and status file are shown by /backup status. By default they are in ../VaultBackup-state/restore-jobs/<job-id>/helper.log and status.properties relative to the server root. Do not share job.properties; it contains authentication material. A live backup cannot make unrelated plugins or external databases transactionally consistent.
 
-Restore sequence:
+An old waiting reservation may be reconciled while startup continues with a retained root guard. An actual restore conflict or evidence of an incomplete replacement cannot safely permit ordinary world startup. This edition removes redundant interaction steps, not authorization, archive integrity checks, or the requirement to restore offline.
 
-1. Disable host/watchdog automatic restarts and coordinate with other administrators.
-2. Run `/backup restore <id>`, read the warning, then `/backup restore <id> confirm` as the same administrator before the preview expires.
-3. Confirmation reserves the restore and leaves the server running. Status shows waiting for manual stop. The reservation has no automatic timeout; its archive stays pinned and new backups/settings changes are blocked.
-4. To cancel before stopping, run `/backup restore cancel` or use the GUI. Wait for confirmed cancellation. CANCEL_PENDING is not completed cancellation: keep the server running and inspect/retry. Once applying has started, this command cannot undo the restore.
-5. When ready, perform a normal `stop`. The helper waits for the recorded JVM to exit and verifies its shutdown-path marker, process identity and locks before changing the server root.
-6. With the server stopped, inspect the external state directory's restore-jobs/<job-id>/status.properties and helper.log. No separate progress window opens. Require SUCCESS and helper-process exit before manually starting the server. RECOVERY_REQUIRED is not permission to restart.
-7. On manual startup, authenticated offline verification produces a success message. The helper never restarts the server. A reservation or stopped JVM alone is not a successful restore.
+Verification scope: this revision targets Paper/Purpur/Spigot 26.2 and 26.3 on Java 25. Fresh Spigot runtime preparation was blocked; API compilation is not an executed-server result. Windows and real-client GUI interaction remain untested. Purpur 26.3 is experimental. See TEST-RESULTS.md for exact final artifact and runtime evidence.
 
-A shutdown-path marker is not proof that the administrator typed stop or that every save completed. An orderly fault shutdown can also trigger an already-confirmed reservation. An abrupt exit without the marker refuses automatic application. Never erase job state to force another attempt.
-
-## Recovery and limits
-
-The old root is retained as a rollback sibling, including files excluded from the restored backup. Keep it until you have checked the result. See docs/OFFLINE-RESTORE.md for active, uncancelled manual-helper jobs and explicit recovery. Permanently cancelled jobs cannot be resumed by a wrapper or command-line flag.
-
-A full backup includes plugin JARs and configuration. Restoring an old archive can reinstall the older automatic-stop behavior or the previous deletion rules. Keep this revision outside the server root and check which JAR/config will be started.
-
-Live ZIP backups cannot make external databases or arbitrary plugin writers transactionally consistent. ZIP restores preserve contents and directory layout, not ACLs, ownership or executable bits. Backups can contain secrets: protect them and do not publish them. New Linux directories use owner-only access; Windows inherited ACLs require review.
-
-See TEST-RESULTS.md and KNOWN-LIMITATIONS.md. This revision's real-client GUI/player testing, Windows execution, real Discord delivery and hardware power-loss scenarios are not established by Linux server tests. There is no DRM or activation service. GPLv3 permits commercial use and paid redistribution subject to its terms; our distribution is free of charge.
-
-If a backup reports `Source changed during backup`, that attempt was refused rather than published as a complete snapshot. The runtime tests encountered a changing Spark JFR temporary recording under plugins/spark/tmp. Stop the profiler normally, or explicitly exclude only disposable data you do not need restored (for example `plugins/spark/tmp/**`). Exclusions affect the restored tree; never broadly exclude worlds or databases merely to hide a warning.
-
-## Deleting your final backup
-
-Manual deletion can remove the final verified good backup after an explicit warning and confirmation. You will have zero recovery points in this backup store afterward; the plugin cannot restore from a backup you deleted. There is no bypass for a backup reserved for restoration. Automatic count/size retention still preserves at least one verified good backup. If another backup disappears between preview and confirmation, the plugin warns again and requires fresh confirmation before deleting the now-last backup.
+Prerelease test build: concurrent startup during restoration is unsupported. Paper can write world files after the plugin requests shutdown on a guard conflict. Disable host auto-restart and do not start until the restore helper has completed and exited. This plugin cannot guarantee prevention of corruption caused by a simultaneously started server.

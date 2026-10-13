@@ -18,4 +18,4 @@ jobs:
       - name: Build and run disposable fixture tests
         run: bash gradlew --no-daemon clean release check
       - name: Verify the tested release bytes
-        run: sha256sum --check release/SHA256SUMS.txt
+        run: (cd build/libs && sha256sum --check ../../release/SHA256SUMS.txt)

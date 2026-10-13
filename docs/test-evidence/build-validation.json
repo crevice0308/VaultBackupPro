@@ -1,0 +1,36 @@
+{
+  "version": "1.2.0",
+  "java": "Temurin 25.0.4.1+1",
+  "gradle": "9.8.1",
+  "proguard": "7.10.0",
+  "dependency_verification": "strict SHA-256",
+  "clean_release_check": "PASS",
+  "independent_directory_clean_release": "byte-identical",
+  "plugin_sha256": "598d17446beb71b56b58386edeaf3f51d9d943a71b0ac76c72dcc54d77550996",
+  "helper_sha256": "308511e9c2c7c7950c8e16181033182cbab342e834b37d1de686dc4257c096e2",
+  "executed_checks": {
+    "core": 104,
+    "direct_actions_simulated_bukkit": 60,
+    "configuration_localization": 327,
+    "lifecycle_adapter": 19,
+    "restore": 174,
+    "startup": 149
+  },
+  "source_only_gui_checks": 10,
+  "linux_wrapper_argument_scenarios": 4,
+  "independent_plain_review": {
+    "core": 104,
+    "direct_actions": 57,
+    "settings": 322,
+    "restore": 174,
+    "startup": 149,
+    "note": "Before the narrow default-exclusion configuration tests and immediate create acceptance message/tests. No helper/guard code changes."
+  },
+  "not_executed": [
+    "Windows",
+    "real Minecraft client GUI",
+    "real Discord webhook",
+    "power-loss hardware tests"
+  ],
+  "raw_logs_distributed": false
+}

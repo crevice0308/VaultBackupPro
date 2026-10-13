@@ -1,11 +1,11 @@
-# VaultBackup Pro 1.1.0 — Publication notes
+# VaultBackup Pro 1.2.0 — 配布情報
 
-Public files are VaultBackupPro-1.1.0.jar, VaultBackupPro-1.1.0-plugin.zip and VaultBackupPro-1.1.0-source.zip. Install one plugin JAR only. The source archive includes corresponding source, Gradle build, test harnesses and GPLv3 notices. Exact hashes are in TEST-RESULTS.md and release/SHA256SUMS.txt.
+ローカル納品用の VaultBackupPro-1.2.0.jar、VaultBackupPro-1.2.0-plugin.zip、VaultBackupPro-1.2.0-source.zip です。GitHub ではプレリリースとして配布します。公開済み 1.0.0 と 1.1.0 は変更しません。
 
-Version 1.1.0 includes independently obfuscated plugin/helper builds, public GPLv3 source and ProGuard settings, hardened build dependencies, and a rollback fix for status-journal failures. It also changes manual deletion: the final verified good backup can be deleted after an explicit zero-backups warning and confirmation. Automatic retention continues to protect at least one good recovery point. Restore-reserved archives remain protected. Full restoration still waits for actual server JVM exit and requires manual restart.
+無料 GPL-3.0-only。難読化プラグインと独立ヘルパー、読みやすい対応ソース、ビルド・難読化設定、検証用コードと結果を同梱します。生のユーザーログ、認証情報、実サーバー、ワールド、バックアップ、作業キャッシュは含めません。
 
-The existing 1.0.0 tag, release and assets remain unchanged. Restoring an older full backup may restore its older plugin/configuration; check the version before starting.
+利用上の注意、最終ハッシュ、確認した環境と未確認事項は README.md、TEST-RESULTS.md、KNOWN-LIMITATIONS.md を参照してください。将来の公開説明は「操作性の改善・不具合修正」と簡潔に記載します。
 
-The public packages omit user-provided logs, addresses/identifiers, raw local execution logs, temporary fixture paths, generated worlds, server binaries, backup archives and journals. The published evidence is a curated test summary and sanitized artifact metadata. Windows execution and real-client GUI interaction are not automatically established by Linux console tests; consult the final report. Purpur 26.3 remains experimental upstream.
+## プレリリース（テスト版）・必須の起動条件
 
-This is free GPL-3.0-only software without warranty. GPLv3 permits commercial use and paid redistribution subject to its terms. Preserve the corresponding-source and notice obligations when redistributing.
+この 1.2.0 はプレリリースのテスト用配布です。ホストの自動再起動を無効にし、復元ヘルパーの完了と終了を確認してから手動起動してください。復元処理中に別のサーバーを起動する運用は未対応です。Paper はプラグインの停止要求後にもワールドを書き込むことが実測されており、プラグインだけではその競合によるデータ破損を防げません。ホスティング側の設定を確認できない環境で本番安全を保証しません。

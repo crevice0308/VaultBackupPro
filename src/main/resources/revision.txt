@@ -1,5 +1,5 @@
 VaultBackup Pro
-Version: 1.1.0
-Revision: ExplicitLastBackupDeletion
+Version: 1.2.0
+Revision: DirectAdminActions
 License: GPL-3.0-only
-Default artifacts: non-obfuscated
+Default artifacts: obfuscated

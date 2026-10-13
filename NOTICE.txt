@@ -1,4 +1,4 @@
-VaultBackup Pro 1.1.0
+VaultBackup Pro 1.2.0
 
 Original project source and restore helper code are licensed under GNU General Public License version 3 only (SPDX: GPL-3.0-only). See LICENSE.txt for the full terms. Third-party files retain their original licenses and notices; see THIRD-PARTY-NOTICES.md.
 
@@ -6,7 +6,7 @@ This program is free software: you may redistribute it and/or modify it under GN
 
 This project's distribution is free of charge. GPLv3 permits commercial use and paid redistribution under its terms; no additional noncommercial restriction is imposed.
 
-Corresponding source, Gradle build configuration, tests and documentation accompany this release in VaultBackupPro-1.1.0-source.zip and at https://github.com/crevice0308/VaultBackupPro . Preserve applicable source availability, license and notice obligations when redistributing binaries or modified versions.
+Corresponding source, Gradle build configuration, tests and documentation accompany this release in VaultBackupPro-1.2.0-source.zip and at https://github.com/crevice0308/VaultBackupPro . Preserve applicable source availability, license and notice obligations when redistributing binaries or modified versions.
 
 No Minecraft/Paper/Purpur/Spigot server distribution or Java runtime is bundled. Obtain server software from its official publisher.
 

@@ -1,6 +1,10 @@
 # Spigot compatibility and build provenance
 
-Verified on 2026-10-13. Java 25 is the release baseline.
+Java 25 is the release baseline.
+
+## 1.2.0 verification scope
+
+The 1.2.0 build compiles against the pinned Spigot 26.2 API below. Fresh Spigot 26.2/26.3 runtime preparation did not complete in this environment: official BuildTools bootstrap encountered network failures and its subsequent retry was cancelled. No 1.2.0 Spigot server lifecycle run is claimed. The locally built server provenance and earlier source checks below describe the previous 1.1.0 validation only. Paper/Purpur 1.2.0 runtime results are reported separately.
 
 ## Common plugin API
 
@@ -27,7 +31,7 @@ The isolated `ServerLifecycle` adapter resolves the public implementation method
 
 The public method signatures and vanilla save-command call were checked against both Spigot source builds and the four Paper/Purpur test distributions. A focused adapter probe passed 19 assertions covering save arguments, non-main-thread rejection, false/error handling, missing/malformed implementations, stop-state checks, and Japanese/English diagnostics. Full end-to-end runtime results are recorded in [TEST-RESULTS.md](../TEST-RESULTS.md).
 
-## Official server build provenance
+## Historical 1.1.0 official server build provenance
 
 Both test distributions were produced locally by official Spigot BuildTools. No third-party server-download site was used.
 

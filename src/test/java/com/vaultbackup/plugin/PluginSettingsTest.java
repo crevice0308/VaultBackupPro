@@ -22,6 +22,21 @@ public final class PluginSettingsTest {
  public static void main(String[] args)throws Exception {
   template=Files.readString(Path.of(args[0]));base=Files.createTempDirectory("vaultbackup-config-test-");root=Files.createDirectory(base.resolve("server"));
   var s=PluginSettings.from(base());s.options();if(s.maxEntries()!=100000||s.intervalMinutes()!=60||s.discordEnabled()||!s.language().equals("ja_JP"))throw new AssertionError("defaults");checks++;
+  if(!s.excludes().contains(".paper/console_history"))throw new AssertionError("default console history exclusion");checks++;
+  Files.createDirectories(root.resolve(".paper"));
+  Files.writeString(root.resolve(".paper/console_history"),"initial console history");
+  Files.writeString(root.resolve(".paper/keep.dat"),"keep neighbouring data");
+  var engine=new com.vaultbackup.core.BackupEngine(s.options());
+  var record=engine.createBackup("default history exclusion",()->false,message->{
+   try { Files.writeString(root.resolve(".paper/console_history"),"console history changed during backup "+message); }
+   catch(java.io.IOException e){throw new java.io.UncheckedIOException(e);}
+  });
+  try(var zip=new java.util.zip.ZipFile(record.zipPath().toFile())) {
+   if(zip.getEntry(".paper/console_history")!=null)throw new AssertionError("history leaked");checks++;
+   if(zip.getEntry(".paper/keep.dat")==null)throw new AssertionError("neighbour was excluded");checks++;
+  }
+  var explicit=base();explicit.set("backup.exclude",List.of("logs/**"));
+  if(!PluginSettings.from(explicit).excludes().equals(List.of("logs/**")))throw new AssertionError("existing config exclusions changed");checks++;
   for(String v:List.of("26.2","26.3","26.2-R0.1-SNAPSHOT","26.3-R0.1-SNAPSHOT","26.2.build.133-stable","26.3.build.28-stable","26.2.build.1")) {
    if(ServerVersions.minecraftVersion(v).isEmpty())throw new AssertionError("supported version rejected "+v);checks++;
   }
@@ -64,7 +79,20 @@ public final class PluginSettingsTest {
   reject("retention.max-bytes",new java.math.BigInteger("18446744073709551616"));
   reject("backup.include",List.of());reject("backup.include",List.of(7));reject("backup.exclude",List.of(""));
   reject("storage.backup-directory",root.resolve("backups").toString());reject("storage.state-directory",base.resolve("backups/nested").toString());
-  reject("restore.helper-jar",base.resolve("outside.jar").toString());reject("restore.confirmation-seconds",1);
+  reject("restore.helper-jar",base.resolve("outside.jar").toString());
+  for(Object legacyTtl:List.of(1,-1,"obsolete",true)) {
+   var legacySettings=base();legacySettings.set("restore.confirmation-seconds",legacyTtl);
+   if(PluginSettings.from(legacySettings).confirmationSeconds()!=60)throw new AssertionError("legacy TTL affects direct operation");checks++;
+  }
+  var missingRoot=base();Path absent=base.resolve("not-created-server");missingRoot.set("storage.server-root",absent.toString());
+  if(!PluginSettings.from(missingRoot).serverRoot().equals(absent)||Files.exists(absent))throw new AssertionError("missing root not deferred safely");checks++;
+  var changed=base();changed.set("automatic.enabled",false);changed.set("automatic.interval-minutes",5);changed.set("language","en_US");
+  if(!VaultBackupPlugin.safeReservedSettings(s,PluginSettings.from(changed)))throw new AssertionError("safe reserved settings rejected");checks++;
+  for(var entry:Map.<String,Object>of("retention.max-count",21,"retention.max-bytes",1L,"backup.compression-level",3,
+   "backup.exclude",List.of("other/**"),"limits.max-entries",99999).entrySet()) {
+   var structural=base();structural.set(entry.getKey(),entry.getValue());
+   if(VaultBackupPlugin.safeReservedSettings(s,PluginSettings.from(structural)))throw new AssertionError("structural reserved change accepted "+entry.getKey());checks++;
+  }
   reject("notifications.discord.enabled",true);
   var malformedWebhook=base();malformedWebhook.set("notifications.discord.webhook-url","https://discord.com/api/webhooks/123/secret bad");
   try{PluginSettings.from(malformedWebhook);throw new AssertionError("malformed credential accepted");}catch(IllegalArgumentException expected){if(expected.getMessage().contains("secret"))throw new AssertionError("credential leaked",expected);}checks++;

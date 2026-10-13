@@ -28,8 +28,9 @@ public record PluginSettings(Path serverRoot, Path backupDirectory, Path stateDi
         String language = requiredString(y, "language", Messages.DEFAULT_LANGUAGE);
         if (!Messages.supported(language)) throw invalid(y, "settings.language");
         Path root = Path.of(requiredString(y, "storage.server-root", ".")).toAbsolutePath().normalize();
-        if (!Files.isDirectory(root)) throw invalid(y, "settings.root");
-        root = root.toRealPath();
+        // Keep the configured lexical root intact, even when missing, a file or a symlink.
+        // The startup coordinator acquires its lifetime guard before classifying those as
+        // HARD_CONFLICT. Never create or resolve away an unsafe root during config parsing.
         Path backup = resolve(y, root, requiredString(y, "storage.backup-directory", "../VaultBackup-backups"));
         Path state = resolve(y, root, requiredString(y, "storage.state-directory", "../VaultBackup-state"));
         Path helper = resolve(y, root, requiredString(y, "restore.helper-jar", "../VaultBackup-state/helper/vaultbackup-restore.jar"));
@@ -54,7 +55,9 @@ public record PluginSettings(Path serverRoot, Path backupDirectory, Path stateDi
         double ratio = ((Number) ratioValue).doubleValue();
         if (!Double.isFinite(ratio) || ratio < 1 || ratio > 10000)
             throw invalid(y, "settings.range", "limits.max-compression-ratio", 1, 10000);
-        long ttl = number(y, "restore.confirmation-seconds", 60, 15, 600);
+        // Legacy confirmation-seconds is deliberately ignored. Direct actions consume this
+        // short-lived internal token immediately; no administrator countdown is displayed.
+        long ttl = 60;
         boolean webhookEnabled = bool(y, "notifications.discord.enabled", false);
         String url = y.getString("notifications.discord.webhook-url", "").trim();
         URI webhook = null;

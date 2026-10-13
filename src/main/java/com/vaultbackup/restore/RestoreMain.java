@@ -46,12 +46,16 @@ public final class RestoreMain {
                         RestoreJobState.recordProcess(job.dir,job.p,ProcessHandle.current());
                         if(recover){RestoreFiles.requireDeadParent(job.p);try(Guard guard=guard(job)){recover(job);return 0;}}
                         String status=RestoreFiles.status(job.dir);
+                        if(Files.exists(job.dir.resolve("recovery-receipt.properties"),RestoreFiles.NOFOLLOW)) {
+                            RestoreJobState.verifiedRecovery(job.dir,job.p);
+                            throw new IOException("This job already completed original-root recovery and cannot restore again. Start the server to reconcile its completed-recovery receipt.");
+                        }
                         if(status.equals("SUCCESS")){System.out.println(RestoreFiles.message(job.p,"Journal reports SUCCESS. No changes made; validate the receipt before startup. Rollback: ","記録は SUCCESS です。変更していません。起動前に完了証明を検証してください。元データ: ")+job.rollback);return 0;}
                         if(!Set.of("COMMITTED","READY","WAITING_FOR_MANUAL_STOP","EXPIRED","FAILED_BEFORE_SWAP").contains(status))throw new IOException("Job journal is "+status+"; inspect it and use --recover while stopped. Never resume an uncertain swap.");
                         if(!manual) {
                             if(!RestoreFiles.required(job.p,"formatVersion").equals("2") || !"MANUAL_NORMAL_STOP".equals(job.p.getProperty("shutdownPolicy")))throw new IOException("Old or unknown job protocol cannot wait automatically; review it using explicit stopped-server manual mode");
                             validateLivingParent(job.p);
-                            RestoreFiles.status(job.dir,"WAITING_FOR_MANUAL_STOP","Reserved. Waiting without a time limit for your normal server stop and actual JVM exit. No restart will be performed.");
+                            status(job,"WAITING_FOR_MANUAL_STOP","Reserved. Waiting without a time limit for your normal server stop and actual JVM exit. No restart will be performed.");
                         } else RestoreFiles.requireDeadParent(job.p);
                     }
                     if(!manual && !waitForExit(job))return 3;
@@ -62,7 +66,7 @@ public final class RestoreMain {
                         if(!manual)RestoreJobState.requireNormalShutdown(job.dir,job.p);
                         try(Guard guard=guard(job)) {
                             RestoreFiles.requireDeadParent(job.p);
-                            RestoreFiles.status(job.dir,"PARENT_EXITED","Server shutdown path and recorded JVM exit confirmed; beginning offline application");
+                            status(job,"PARENT_EXITED","Server shutdown path and recorded JVM exit confirmed; beginning offline application");
                             // This gate remains held through staging, application, verification, and
                             // rollback. A late cancel can fail, but can NEVER falsely acknowledge.
                             execute(job);
@@ -71,7 +75,7 @@ public final class RestoreMain {
                 } catch(IOException e) {
                     try(RestoreJobState.Gate gate=RestoreJobState.lock(job.dir,Duration.ofSeconds(2))) {
                         if(gate!=null && !RestoreJobState.hasCancellation(job.dir) && RestoreJobState.waiting(RestoreFiles.status(job.dir)))
-                            RestoreFiles.status(job.dir,"FAILED_BEFORE_SWAP",e.getMessage());
+                            status(job,"FAILED_BEFORE_SWAP",e.getMessage());
                     }catch(Exception journalError){e.addSuppressed(journalError);}
                     throw e;
                 }
@@ -79,10 +83,17 @@ public final class RestoreMain {
         }
         return 0;
     }
+    /** Only the standalone helper owns stdout; plugin journal writes stay silent. */
+    private static void status(Job job,String status,String message)throws IOException {
+        RestoreFiles.status(job.dir,status,message);
+        System.out.println("[VaultBackupPro restore] "+status+": "+RestoreFiles.load(job.dir.resolve("status.properties")).getProperty("message",""));
+    }
     private static boolean cancelled(Job job)throws IOException {
         if(!RestoreJobState.hasCancellation(job.dir))return false;
         // An invalid/symlink/partial flag is an error, never permission to continue.
-        RestoreJobState.acknowledgeCancellation(job.dir,job.p,"HELPER");return true;
+        RestoreJobState.acknowledgeCancellation(job.dir,job.p,"HELPER");
+        System.out.println("[VaultBackupPro restore] CANCELLED: "+RestoreFiles.load(job.dir.resolve("status.properties")).getProperty("message",""));
+        return true;
     }
     private static Job validateJob(Path file)throws IOException {
         file=file.toAbsolutePath().normalize();Properties p=RestoreFiles.load(file);
@@ -143,7 +154,7 @@ public final class RestoreMain {
     private static Guard guard(Job job)throws IOException {
         FileChannel channel=FileChannel.open(job.state.resolve(RestoreFiles.guardName(job.root)),StandardOpenOption.CREATE,StandardOpenOption.WRITE,LinkOption.NOFOLLOW_LINKS);
         FileLock lock;
-        try{lock=channel.tryLock();}catch(OverlappingFileLockException e){channel.close();throw new IOException("Server root guard is still held",e);}
+        try{lock=channel.tryLock();}catch(OverlappingFileLockException e){RestoreRootLease.retainChannelUntilExit(channel);throw new IOException("Server root guard is still held",e);}
         if(lock==null){channel.close();throw new IOException("Server root guard is still held by a running server/helper. No restore permitted.");}
         return new Guard(channel,lock);
     }
@@ -167,7 +178,7 @@ public final class RestoreMain {
         try {
             RestoreFiles.directory(job.root,false);checkWorldLocks(job.root);
             for(Path target:List.of(job.stage,job.rollback,job.failed))if(Files.exists(target,RestoreFiles.NOFOLLOW))throw new IOException("Recovery path already exists: "+target);
-            RestoreFiles.status(job.dir,"STAGING","Extracting and verifying archive into a sibling directory; original root unchanged");
+            status(job,"STAGING","Extracting and verifying archive into a sibling directory; original root unchanged");
             RestoreFiles.createPrivateDirectory(job.stage);
             if(!Files.getFileStore(job.stage).equals(Files.getFileStore(job.root)))throw new IOException("Stage and server-root must be on the same filesystem");
             RestoreArchive.Verified verified=RestoreArchive.extract(job.archive,RestoreFiles.required(job.p,"archiveSha256"),job.stage);
@@ -176,15 +187,15 @@ public final class RestoreMain {
             try (var directories = Files.walk(job.stage)) {
                 for (Path directory : directories.filter(Files::isDirectory).sorted(Comparator.reverseOrder()).toList()) RestoreFiles.syncDirectory(directory);
             }
-            RestoreFiles.status(job.dir,"STAGED","All staged data verified; preparing atomic rename");
+            status(job,"STAGED","All staged data verified; preparing atomic rename");
             RestoreFiles.requireDeadParent(job.p);checkWorldLocks(job.root);
             if(cancelled(job))return;
-            RestoreFiles.status(job.dir,"MOVING_ORIGINAL","Moving original root to preserved rollback directory");
+            status(job,"MOVING_ORIGINAL","Moving original root to preserved rollback directory");
             moveAttempted=true;RestoreFiles.move(job.root,job.rollback);originalMoved=true;
-            RestoreFiles.status(job.dir,"ORIGINAL_MOVED","Original root safely preserved at "+job.rollback);
-            RestoreFiles.status(job.dir,"INSTALLING","Installing verified stage into original server-root path");
+            status(job,"ORIGINAL_MOVED","Original root safely preserved at "+job.rollback);
+            status(job,"INSTALLING","Installing verified stage into original server-root path");
             RestoreFiles.move(job.stage,job.root);installed=true;
-            RestoreFiles.status(job.dir,"VERIFYING_INSTALLED","Checking every installed file before issuing success receipt");
+            status(job,"VERIFYING_INSTALLED","Checking every installed file before issuing success receipt");
             RestoreArchive.verifyInstalled(job.root,verified);
             Properties receipt=new Properties();
             for(String key:List.of("jobId","backupId","serverRoot","archiveSha256","manifestSha256"))receipt.setProperty(key,RestoreFiles.required(job.p,key));
@@ -192,7 +203,7 @@ public final class RestoreMain {
             receipt.setProperty("scope","Exact archive tree installed; excluded/unbacked original files remain in rollback");
             receipt.setProperty("authentication",RestoreFiles.hmac(RestoreFiles.required(job.p,"nonce"),RestoreFiles.receiptPayload(receipt)));
             RestoreFiles.write(job.dir.resolve("receipt.properties"),receipt);
-            RestoreFiles.status(job.dir,"SUCCESS","Offline installed data verified. Server remains stopped. Original root retained at "+job.rollback);
+            status(job,"SUCCESS","Offline installed data verified. Server remains stopped. Original root retained at "+job.rollback);
             System.out.println(RestoreFiles.message(job.p,"Offline restore verified. No restart was performed. Original data: ","オフライン復元の検証が完了しました。自動再起動は行いません。元データ: ")+job.rollback);
         } catch(Exception error) {
             // A move can succeed while the subsequent directory fsync fails. Inspect existence
@@ -202,40 +213,46 @@ public final class RestoreMain {
             if(originalMoved) {
                 // A journal failure may be the install error itself. Reporting rollback must
                 // never prevent the atomic moves that put the preserved original back.
-                try{RestoreFiles.status(job.dir,"ROLLING_BACK","Install failed; restoring untouched original root");}catch(Exception statusError){error.addSuppressed(statusError);}
+                try{status(job,"ROLLING_BACK","Install failed; restoring untouched original root");}catch(Exception statusError){error.addSuppressed(statusError);}
                 try {
                     if(installed)RestoreFiles.move(job.root,job.failed);
                     RestoreFiles.move(job.rollback,job.root);
                     Files.deleteIfExists(job.dir.resolve("receipt.properties"));
-                    try{RestoreFiles.status(job.dir,"FAILED_ROLLED_BACK","Original root restored; failed/staged data retained. "+error.getMessage());}catch(Exception statusError){error.addSuppressed(statusError);}
+                    RestoreJobState.recordCompletedRecovery(job.dir,job.p,"FAILED_ROLLED_BACK");
+                    try{status(job,"FAILED_ROLLED_BACK","Original root restored; failed/staged data retained. "+error.getMessage());}catch(Exception statusError){error.addSuppressed(statusError);}
                 } catch(Exception rollbackError) {
                     error.addSuppressed(rollbackError);
-                    try{RestoreFiles.status(job.dir,"RECOVERY_REQUIRED","Automatic rollback was incomplete. Do not start server. Preserve every sibling and use --recover while stopped. "+error.getMessage());}catch(Exception statusError){error.addSuppressed(statusError);}
+                    try{status(job,"RECOVERY_REQUIRED","Automatic rollback was incomplete. Do not start server. Preserve every sibling and use --recover while stopped. "+error.getMessage());}catch(Exception statusError){error.addSuppressed(statusError);}
                 }
             } else {
-                try{RestoreFiles.status(job.dir,Files.exists(job.rollback,RestoreFiles.NOFOLLOW) ? "RECOVERY_REQUIRED" : "FAILED_BEFORE_SWAP","Original server-root was not moved by this attempt. Stage retained. "+error.getMessage());}catch(Exception statusError){error.addSuppressed(statusError);}
+                try{status(job,Files.exists(job.rollback,RestoreFiles.NOFOLLOW) ? "RECOVERY_REQUIRED" : "FAILED_BEFORE_SWAP","Original server-root was not moved by this attempt. Stage retained. "+error.getMessage());}catch(Exception statusError){error.addSuppressed(statusError);}
             }
             if(error instanceof IOException io)throw io;throw new IOException("Restore failed",error);
         }
     }
     private static void recover(Job job)throws IOException {
         String status=RestoreFiles.status(job.dir);
+        if(Files.exists(job.dir.resolve("recovery-receipt.properties"),RestoreFiles.NOFOLLOW)) {
+            RestoreJobState.verifiedRecovery(job.dir,job.p);
+            System.out.println(RestoreFiles.message(job.p,"Original-root recovery was already completed and authenticated. No changes made.","元データの復旧は既に完了し、証明を確認しました。変更していません。"));return;
+        }
         if(status.equals("SUCCESS"))throw new IOException("Successful jobs are not automatically reverted. Original rollback is preserved; use a separate reviewed recovery plan.");
         RestoreFiles.requireDeadParent(job.p);checkWorldLocks(job.root);checkWorldLocks(job.rollback);
         if(Files.exists(job.rollback,RestoreFiles.NOFOLLOW)) {
             RestoreFiles.directory(job.rollback,false);
-            RestoreFiles.status(job.dir,"ROLLING_BACK","Explicit stopped-server recovery restoring preserved original root");
+            status(job,"ROLLING_BACK","Explicit stopped-server recovery restoring preserved original root");
             if(Files.exists(job.root,RestoreFiles.NOFOLLOW)) {
                 if(Files.exists(job.failed,RestoreFiles.NOFOLLOW))throw new IOException("Failed-tree preservation target already exists. No data overwritten; manual inspection required.");
                 RestoreFiles.move(job.root,job.failed);
             }
             RestoreFiles.move(job.rollback,job.root);
             Files.deleteIfExists(job.dir.resolve("receipt.properties"));
-            RestoreFiles.status(job.dir,"RECOVERED","Original root restored. Stage/failed tree preserved. Server remains stopped.");
+            RestoreJobState.recordCompletedRecovery(job.dir,job.p,"RECOVERED");
+            status(job,"RECOVERED","Original root restored. Stage/failed tree preserved. Server remains stopped.");
             System.out.println(RestoreFiles.message(job.p,"Original server-root recovered. No restart performed.","元のサーバーデータを復旧しました。自動再起動は行いません。"));
         } else if(Set.of("COMMITTED","READY","WAITING_FOR_MANUAL_STOP","PARENT_EXITED","STAGING","STAGED","FAILED_BEFORE_SWAP","CANCELLED","EXPIRED").contains(status)
                 && Files.isDirectory(job.root,RestoreFiles.NOFOLLOW)) {
-            RestoreFiles.status(job.dir,"RECOVERED","No original-root move was recorded; current root left untouched. Stage preserved.");
+            status(job,"FAILED_BEFORE_SWAP","No original-root move was recorded; current root left untouched. Stage preserved.");
             System.out.println(RestoreFiles.message(job.p,"No original-root move recorded. Root was left untouched; stage retained.","元データの移動記録はありません。現在のデータと作業領域を保持しました。"));
         } else throw new IOException("Cannot prove original root location from journal. No data changed. Inspect root, stage, rollback, and failed siblings manually.");
     }
