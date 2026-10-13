@@ -1,0 +1,62 @@
+name: One-time v1.2.0 prerelease
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-v1.2.0.yml']
+permissions:
+  contents: read
+concurrency:
+  group: vaultbackup-pro-v1.2.0-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'crevice0308/VaultBackupPro' && github.event.before == '64e11092159dac9fb8204690da72c0e7f65e8c87' && github.event.head_commit.message == 'Publish VaultBackup Pro 1.2.0 prerelease once (20261013T2346)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install checksum-pinned official Java 25
+        run: bash .github/scripts/setup-java25.sh
+      - name: Rebuild, test and verify reviewed artifacts
+        run: |
+          set -euo pipefail
+          bash gradlew --no-daemon clean release check
+          (cd build/libs && sha256sum --check ../../release/SHA256SUMS.txt)
+          python3 tools/package_release.py dist
+          (cd dist && printf '%s\n' \
+            '598d17446beb71b56b58386edeaf3f51d9d943a71b0ac76c72dcc54d77550996  VaultBackupPro-1.2.0.jar' \
+            '52d18ff5b8e9c0cb16dc1a366435a169d84f00d5badb0dd35dbcc52f4bdc29ae  VaultBackupPro-1.2.0-plugin.zip' \
+            '6f37f45afa3f261e9f498c941085b1b8883f8b814e23668e33942c531a9a2f65  VaultBackupPro-1.2.0-source.zip' | sha256sum --check -)
+      - name: Create only new v1.2.0 prerelease, verify assets, preserve latest stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: crevice0308/VaultBackupPro
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/$GH_REPO/releases/latest --jq .tag_name)" = v1.1.0
+          for endpoint in releases/tags/v1.2.0 git/ref/tags/v1.2.0; do
+            if gh api "repos/$GH_REPO/$endpoint" > existing.json 2> existing.err; then
+              echo 'Refusing to alter an existing v1.2.0 release or tag.' >&2
+              exit 1
+            fi
+            grep -q 'HTTP 404' existing.err || { cat existing.err >&2; exit 1; }
+          done
+          gh release create v1.2.0 \
+            dist/VaultBackupPro-1.2.0.jar \
+            dist/VaultBackupPro-1.2.0-plugin.zip \
+            dist/VaultBackupPro-1.2.0-source.zip \
+            dist/SHA256SUMS.txt \
+            --target "$GITHUB_SHA" --title 'VaultBackup Pro 1.2.0 (Pre-release)' \
+            --notes-file release/NOTES.md --draft --prerelease --latest=false
+          mkdir downloaded-release
+          gh release download v1.2.0 --dir downloaded-release
+          cmp dist/SHA256SUMS.txt downloaded-release/SHA256SUMS.txt
+          (cd downloaded-release && sha256sum --check SHA256SUMS.txt)
+          gh release edit v1.2.0 --draft=false --prerelease --latest=false
+          test "$(gh api repos/$GH_REPO/releases/tags/v1.2.0 --jq '.prerelease and (.draft | not)')" = true
+          test "$(gh api repos/$GH_REPO/releases/latest --jq .tag_name)" = v1.1.0
+          test "$(gh api repos/$GH_REPO/git/ref/tags/v1.2.0 --jq .object.sha)" = "$GITHUB_SHA"
