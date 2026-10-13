@@ -1,11 +1,11 @@
-# 要件と実装の対応（VaultBackup Pro 1.0.0）
+# 要件と実装の対応（VaultBackup Pro 1.1.0）
 
 | 要件 | 実装・検証 |
 |---|---|
 | Paper/Purpur/Spigot 26.2/26.3、Java 25 | 明示的バージョン判定。公式取得・BuildTools 由来の正確なビルドと最終 JAR 実行結果は TEST-RESULTS.md |
 | 管理者 GUI、権限、コマンド、補完 | BackupMenus / BackupCommands / plugin.yml。GUI 所有者識別と確認画面。実 Minecraft クライアント操作は未検証 |
 | 日本語・英語 | ja_JP 標準、en_US 切替。メッセージキー・置換パラメーターの一致検証。旧設定には安全な既定値 |
-| サーバールート全体の ZIP | BackupEngine、外部出力・制御ディレクトリ、除外、世代・容量管理、少なくとも正常 1 世代維持 |
+| サーバールート全体の ZIP | BackupEngine、外部出力・制御ディレクトリ、除外、世代・容量管理、自動保持は正常 1 世代維持、手動最終削除は明示警告・確認後のみ |
 | 完全性 | 全体 SHA-256、エントリーごとの manifest、メタデータ最終公開、不完全 ZIP 不採用 |
 | 保存と非同期処理 | メインスレッドで ServerLifecycle の検証済み saveEverything(true,true,true)、プレイヤー含む。単一非同期処理、autosave 復帰。外部 DB の原子性は保証しない |
 | 復元予約・手動停止 | 二段階確認後もプレイ継続。状態に「手動停止待ち」。通常 stop 後、実 PID/start identity の終了を待つ |
@@ -16,6 +16,8 @@
 | 自動バックアップ | GUI 5 分～24 時間、カスタム分指定、設定保持。元版の実時間テストと本改訂の結果を区別 |
 | パス・ZIP 攻撃 | traversal、大小文字/Unicode 衝突、symlink、容量上限、再帰保存先防止、失敗時 rollback の fixture |
 | Discord | 明示設定時のみ HTTPS Discord エンドポイント。実ユーザーデータ・実 webhook の送信なし |
-| 無料・オープンソース | GPL-3.0-only 全文、第三者通知、通常の非難読化 JAR、対応ソース・Gradle・試験・文書を同梱。公開ファイル名は PUBLICATION-NOTES.md を参照 |
+| 無料・オープンソース | GPL-3.0-only 全文、第三者通知、難読化 JAR、対応ソース・Gradle・試験・文書を同梱。公開ファイル名は PUBLICATION-NOTES.md を参照 |
 
 数値カスタム入力は文書記載のコマンドを使います。保存先変更は設定編集後に再起動します。
+
+1.1.0 手動削除: 最後の正常な 1 件も 0 件になる警告・確認後に削除可能。確認中に最後の 1 件へ変わった場合は再確認。自動保持と復元予約対象の保護は継続します。実行試験・GUI 検証範囲は最終 TEST-RESULTS.md を参照してください。

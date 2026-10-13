@@ -1,27 +1,90 @@
 plugins { id 'java' }
-if (Runtime.version().feature() < 25) throw new GradleException('Run Gradle with JDK 25 or newer (set JAVA_HOME).')
+if (Runtime.version().feature() != 25) throw new GradleException('Run Gradle with JDK 25 (set JAVA_HOME).')
 group = 'com.vaultbackup'
-version = '1.0.0'
-repositories { mavenCentral(); maven { url = 'https://hub.spigotmc.org/nexus/content/repositories/snapshots/' } }
-// Official timestamped API snapshot, pinned rather than a moving SNAPSHOT.
-dependencies { compileOnly 'org.spigotmc:spigot-api:26.2-R0.1-20260915.151451-13' }
+version = '1.1.0'
+repositories {
+ mavenCentral { content { excludeGroup 'org.spigotmc' } }
+ exclusiveContent {
+  forRepository { maven { name = 'officialSpigot'; url = 'https://hub.spigotmc.org/nexus/content/repositories/snapshots/' } }
+  filter { includeGroup 'org.spigotmc' }
+ }
+}
+configurations { proguardTool { canBeConsumed = false; canBeResolved = true } }
+dependencies {
+ // Official immutable timestamped API snapshot, not a moving SNAPSHOT.
+ compileOnly 'org.spigotmc:spigot-api:26.2-R0.1-20260915.151451-13'
+ proguardTool 'com.guardsquare:proguard-base:7.10.0'
+ constraints { proguardTool('org.json:json:20260719') { because 'Build-tool parser hardening for GHSA-ghc9-756g-vrcv' } }
+}
 java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
 tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8'; options.release = 25 }
 tasks.withType(AbstractArchiveTask).configureEach { preserveFileTimestamps = false; reproducibleFileOrder = true }
-jar { archiveBaseName = 'VaultBackupPro'; archiveClassifier = '' }
-tasks.register('restoreJar', Jar) {
+processResources { from(projectDir) { include 'LICENSE.txt', 'NOTICE.txt', 'THIRD-PARTY-NOTICES.md'; into 'META-INF' } }
+jar { archiveBaseName = 'VaultBackupPro'; archiveClassifier = 'plain'; destinationDirectory = layout.buildDirectory.dir('intermediates') }
+tasks.register('restorePlainJar', Jar) {
  dependsOn compileJava
- archiveBaseName = 'vaultbackup-restore'; archiveClassifier = ''
+ archiveBaseName = 'vaultbackup-restore'; archiveClassifier = 'plain'; destinationDirectory = layout.buildDirectory.dir('intermediates')
  from(sourceSets.main.output.classesDirs) { include 'com/vaultbackup/core/**', 'com/vaultbackup/restore/**' }
  from(projectDir) { include 'LICENSE.txt', 'NOTICE.txt', 'THIRD-PARTY-NOTICES.md'; into 'META-INF' }
  manifest { attributes 'Main-Class': 'com.vaultbackup.restore.RestoreMain' }
 }
-processResources {
- dependsOn restoreJar
- from(projectDir) { include 'LICENSE.txt', 'NOTICE.txt', 'THIRD-PARTY-NOTICES.md'; into 'META-INF' }
+// Modern JDKs may omit jmods. Extract the installed JDK runtime solely as a
+// ProGuard library input. No JDK classes are copied into either release JAR.
+def jdkModules = layout.buildDirectory.dir('jdk-modules')
+tasks.register('extractJdkModules', Exec) {
+ inputs.file(new File(System.getProperty('java.home'), 'lib/modules'))
+ outputs.dir(jdkModules)
+ // Remove only this generated output before re-extracting a changed JDK image.
+ doFirst { delete(jdkModules) }
+ commandLine new File(System.getProperty('java.home'), 'bin/jimage').absolutePath, 'extract', '--dir', jdkModules.get().asFile.absolutePath, new File(System.getProperty('java.home'), 'lib/modules').absolutePath
+}
+tasks.register('jdkLibraryJar', Jar) {
+ dependsOn 'extractJdkModules'
+ archiveFileName = 'jdk-library.jar'; destinationDirectory = layout.buildDirectory.dir('intermediates')
+ from(jdkModules) {
+  include '**/*.class'; exclude '**/module-info.class'
+  eachFile { path = path.substring(path.indexOf('/') + 1) }
+  includeEmptyDirs = false
+ }
+ duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+['Restore', 'Plugin'].each { kind ->
+ def plainTask = kind == 'Restore' ? 'restorePlainJar' : 'jar'
+ tasks.register('obfuscate' + kind, JavaExec) {
+  dependsOn plainTask, 'jdkLibraryJar'
+  classpath = configurations.proguardTool
+  mainClass = 'proguard.ProGuard'
+  inputs.files(file('proguard-common.pro'), file('proguard-' + kind.toLowerCase() + '.pro'))
+  inputs.files(tasks.named(plainTask), tasks.named('jdkLibraryJar'))
+  if (kind == 'Plugin') inputs.files(configurations.compileClasspath)
+  outputs.file(layout.buildDirectory.file('obfuscated/' + kind.toLowerCase() + '.jar'))
+  outputs.file(layout.buildDirectory.file('obfuscated/' + kind.toLowerCase() + '-mapping.txt'))
+  doFirst {
+   layout.buildDirectory.dir('obfuscated').get().asFile.mkdirs()
+   def params = ['@' + file('proguard-' + kind.toLowerCase() + '.pro').absolutePath,
+    '-injars', tasks.named(plainTask).get().archiveFile.get().asFile.absolutePath,
+    '-outjars', layout.buildDirectory.file('obfuscated/' + kind.toLowerCase() + '.jar').get().asFile.absolutePath,
+    '-printmapping', layout.buildDirectory.file('obfuscated/' + kind.toLowerCase() + '-mapping.txt').get().asFile.absolutePath,
+    '-libraryjars', tasks.named('jdkLibraryJar').get().archiveFile.get().asFile.absolutePath]
+   if (kind == 'Plugin') configurations.compileClasspath.files.sort().each { params += ['-libraryjars', it.absolutePath] }
+   setArgs(params)
+  }
+ }
+}
+tasks.register('restoreJar', Jar) {
+ dependsOn 'obfuscateRestore'
+ archiveBaseName = 'vaultbackup-restore'; archiveClassifier = ''
+ from({ zipTree(layout.buildDirectory.file('obfuscated/restore.jar')) }) { exclude 'META-INF/MANIFEST.MF' }
+ manifest { attributes 'Main-Class': 'com.vaultbackup.restore.RestoreMain' }
+}
+tasks.register('releaseJar', Jar) {
+ dependsOn 'obfuscatePlugin', 'restoreJar'
+ archiveBaseName = 'VaultBackupPro'; archiveClassifier = ''
+ from({ zipTree(layout.buildDirectory.file('obfuscated/plugin.jar')) }) { exclude 'META-INF/MANIFEST.MF' }
+ // Embed the final independently obfuscated helper without processing it again.
  from(tasks.named('restoreJar')) { rename { 'vaultbackup-restore.jar' } }
 }
-tasks.register('release') { dependsOn jar, restoreJar }
+tasks.register('release') { dependsOn 'releaseJar', 'restoreJar' }
 tasks.register('resolveCompileClasspath') { doLast { configurations.compileClasspath.files.each { println it } } }
 configurations.testCompileClasspath.extendsFrom(configurations.compileOnly)
 configurations.testRuntimeClasspath.extendsFrom(configurations.compileOnly)
@@ -34,7 +97,7 @@ tasks.register('restoreTest', JavaExec) {
  dependsOn testClasses, restoreJar
  classpath = sourceSets.test.runtimeClasspath
  mainClass = 'com.vaultbackup.restore.RestoreSafetyTest'
- args layout.buildDirectory.file('libs/vaultbackup-restore-1.0.0.jar').get().asFile.absolutePath
+ args layout.buildDirectory.file('libs/vaultbackup-restore-1.1.0.jar').get().asFile.absolutePath
 }
 tasks.register('settingsTest', JavaExec) {
  dependsOn testClasses
@@ -51,3 +114,33 @@ tasks.register('lifecycleTest', JavaExec) {
  mainClass = 'com.vaultbackup.plugin.ServerLifecycleProbe'
 }
 check.dependsOn lifecycleTest
+
+tasks.register('deleteWorkflowTest', JavaExec) {
+ dependsOn testClasses
+ classpath = sourceSets.test.runtimeClasspath
+ mainClass = 'com.vaultbackup.plugin.DeleteWorkflowTest'
+}
+check.dependsOn deleteWorkflowTest
+
+tasks.register('obfuscationTest', Exec) {
+ dependsOn 'release'
+ doFirst {
+  commandLine 'python3', file('tools/check_obfuscated_release.py').absolutePath,
+   '--java-home', System.getProperty('java.home'),
+   '--compile-classpath', configurations.compileClasspath.asPath,
+   '--plugin-mapping', layout.buildDirectory.file('obfuscated/plugin-mapping.txt').get().asFile.absolutePath,
+   '--helper-mapping', layout.buildDirectory.file('obfuscated/restore-mapping.txt').get().asFile.absolutePath
+ }
+}
+check.dependsOn 'obfuscationTest'
+tasks.register('dependencyInventory') {
+ doLast {
+  def rows = [:]
+  [configurations.compileClasspath, configurations.proguardTool].each { c ->
+   c.resolvedConfiguration.resolvedArtifacts.each { a ->
+    rows[a.moduleVersion.id.toString() + ':' + a.file.name] = [group:a.moduleVersion.id.group, name:a.moduleVersion.id.name, version:a.moduleVersion.id.version, path:a.file.absolutePath]
+   }
+  }
+  layout.buildDirectory.file('dependency-inventory.json').get().asFile.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(rows.values()))
+ }
+}

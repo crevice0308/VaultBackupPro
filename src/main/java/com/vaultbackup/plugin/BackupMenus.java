@@ -79,7 +79,7 @@ final class BackupMenus implements Listener {
                 t("common.archive",VaultBackupPlugin.humanBytes(record.compressedBytes())),t("common.original",VaultBackupPlugin.humanBytes(record.totalBytes())),
                 t("common.entries",record.entryCount()),"SHA-256: "+record.sha256().substring(0,16)+"…"));
         m.put(11,Material.LIME_CONCRETE,t("menu.restore"),List.of(t("menu.confirmtwice"),t("menu.restore.manual"),t("menu.restore.rollback")),"restore",who -> restoreWarning(who,id,page));
-        m.put(15,Material.RED_CONCRETE,t("menu.delete"),List.of(t("menu.delete.files"),t("menu.confirmtwice")),"delete",who -> deleteWarning(who,id,page));
+        m.put(15,Material.RED_CONCRETE,t("menu.delete"),List.of(t("menu.delete.files"),t("menu.confirmtwice"),t("menu.delete.last"),t("menu.delete.zero"),t("menu.delete.norecovery"),t("menu.delete.pinned")),"delete",who -> deleteWarning(who,id,page));
         m.put(22,Material.ARROW,t("menu.back"),List.of(),"list",who -> openList(who,page));
         show(p,m);
     }
@@ -101,15 +101,18 @@ final class BackupMenus implements Listener {
     }
     private void deleteWarning(Player p, String id, int page) {
         Menu m = make(p,t("menu.delete.warning"),27);
-        m.display(4,Material.TNT,t("menu.delete.question",id),List.of(t("menu.delete.files"),t("menu.delete.permanent")));
-        m.put(11,Material.ORANGE_CONCRETE,t("menu.delete.continue"),List.of(),"delete",who -> { plugin.requestDelete(who,id); deleteFinal(who,id,page); });
+        m.display(4,Material.TNT,t("menu.delete.question",id),List.of(t("menu.delete.files"),t("menu.delete.permanent"),t("menu.delete.last"),t("menu.delete.zero"),t("menu.delete.norecovery"),t("menu.delete.pinned")));
+        m.put(11,Material.ORANGE_CONCRETE,t("menu.delete.continue"),List.of(),"delete",who -> { if (plugin.requestDelete(who,id)) deleteFinal(who,id,page); });
         m.put(15,Material.BARRIER,t("common.cancel"),List.of(),"gui",who -> openInfo(who,id,page));
         show(p,m);
     }
-    private void deleteFinal(Player p, String id, int page) {
+    void deleteFinal(Player p, String id, int page) {
         Menu m = make(p,t("menu.delete.final"),27);
-        m.display(4,Material.REDSTONE_BLOCK,id,List.of(t("menu.delete.noundo"),t("menu.delete.pinned")));
-        m.put(11,Material.RED_CONCRETE,t("menu.delete.confirm"),List.of(),"delete",who -> { who.closeInventory(); plugin.delete(who,id); });
+        boolean warnLast = plugin.lastDeleteWarning(p,id);
+        m.display(4,Material.REDSTONE_BLOCK,id,List.of(t("menu.delete.noundo"),t("menu.delete.last"),t("menu.delete.zero"),t("menu.delete.norecovery"),t("menu.delete.pinned")));
+        m.put(11,Material.RED_CONCRETE,t(warnLast ? "menu.delete.confirm.last" : "menu.delete.confirm"),
+                warnLast ? List.of(t("menu.delete.zero"),t("menu.delete.norecovery")) : List.of(),
+                "delete",who -> { who.closeInventory(); plugin.delete(who,id); });
         m.put(15,Material.BARRIER,t("common.cancel"),List.of(),"gui",who -> { plugin.cancelDelete(who,id); openInfo(who,id,page); });
         show(p,m);
     }

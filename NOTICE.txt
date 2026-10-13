@@ -1,13 +1,13 @@
-VaultBackup Pro 1.0.0 — ManualStop-JA revision
+VaultBackup Pro 1.1.0
 
-Project source and original helper code in this distribution are licensed under the GNU General Public License, version 3 only (SPDX: GPL-3.0-only), as approved by the commissioning user on 2026-10-13. See LICENSE.txt for the full terms. Third-party files retain their own notices and licenses; see THIRD-PARTY-NOTICES.md.
+Original project source and restore helper code are licensed under GNU General Public License version 3 only (SPDX: GPL-3.0-only). See LICENSE.txt for the full terms. Third-party files retain their original licenses and notices; see THIRD-PARTY-NOTICES.md.
 
-This program is free software: you may redistribute it and/or modify it under the terms of GNU GPL version 3. This program is distributed without any warranty, including the implied warranties of merchantability or fitness for a particular purpose. Keep independent backups and verify restoration before relying on it.
+This program is free software: you may redistribute it and/or modify it under GNU GPL version 3. It is distributed without any warranty, including the implied warranties of merchantability or fitness for a particular purpose. Keep independent recovery points and rehearse restoration before relying on it.
 
-The project is provided without charge. GPLv3 also permits commercial use and charging for redistribution under its terms; this project adds no noncommercial or no-resale restriction.
+This project's distribution is free of charge. GPLv3 permits commercial use and paid redistribution under its terms; no additional noncommercial restriction is imposed.
 
-Corresponding source, build configuration, test harnesses and documentation are supplied in the accompanying VaultBackupPro-1.0.0-ManualStop-JA-source.zip. When redistributing a binary, comply with GPLv3's corresponding-source requirements and preserve this license and the applicable notices. Do not describe a binary-only mirror as the complete source distribution.
+Corresponding source, Gradle build configuration, tests and documentation accompany this release in VaultBackupPro-1.1.0-source.zip and at https://github.com/crevice0308/VaultBackupPro . Preserve applicable source availability, license and notice obligations when redistributing binaries or modified versions.
 
-No public source repository has been created by this build. No Minecraft/Paper/Purpur/Spigot server binary is included. Obtain server software from its official project.
+No Minecraft/Paper/Purpur/Spigot server distribution or Java runtime is bundled. Obtain server software from its official publisher.
 
 Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.

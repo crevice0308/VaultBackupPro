@@ -1,13 +1,23 @@
 {
   "plugin": {
-    "sha256": "1abf09736a5ea4bf1b363259a744c9ff050b7d73548db353e7066f357855c7ab",
-    "bytes": 274018,
-    "class_count": 37
+    "file": "VaultBackupPro-1.1.0.jar",
+    "sha256": "54b356a6d7a4ccf5a8e2b62b8d556b033c1c76f8cfe7910e19f95c34328e177b",
+    "bytes": 242619,
+    "classes": 41,
+    "renamed_classes": 38,
+    "java_class_major": 69,
+    "jvm_probe": "VERIFIED classes=41 records=19 enums=1 recordRoundTrips=3"
   },
   "helper": {
-    "sha256": "93ff6574b7af2b8bf3f72a48b4e1a0f1ab9628bbcd78a01e194f1eb416a520a9",
-    "bytes": 105276,
-    "class_count": 25
+    "file": "vaultbackup-restore-1.1.0.jar",
+    "sha256": "a2f17d2d2b9b08ae7bea40ec8aec4391fb7f38ddf9c711720c6aa645e5e73a4f",
+    "bytes": 92617,
+    "classes": 27,
+    "renamed_classes": 25,
+    "java_class_major": 69,
+    "jvm_probe": "VERIFIED classes=27 records=15 enums=1 recordRoundTrips=3",
+    "no_argument_exit": 2
   },
-  "embedded_helper_matches": true
+  "embedded_helper_identical": true,
+  "scope": "Final-JAR structure, JVM verification, reflection, record/enum and entrypoint smoke checks; run restoreTest and real-server acceptance separately."
 }

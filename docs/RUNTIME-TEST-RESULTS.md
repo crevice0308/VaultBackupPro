@@ -1,58 +1,74 @@
-# Runtime test results: VaultBackup Pro 1.0.0
+# Runtime test results: VaultBackup Pro 1.1.0
 
-**PASS: all six exact servers completed the final-artifact backup → reservation → manual stop → offline restore → manual restart cycle.** Japanese/English commands, confirmed cancellation/retry, real scheduling, count retention, and forced-crash refusal passed.
+**PASS: all six exact server builds completed the final obfuscated-artifact deletion, backup, restore reservation, manual stop, offline restore, and manual restart cycle.** Additional Japanese/English confirmation, cancellation, stale-state, diagnostic, automatic-backup, and retention checks passed.
 
-Executed **2026-10-13, 11:16–11:30 UTC**. Console clocks use UTC+09:00. Only this final non-obfuscated GPL release is covered; historical/observer-interrupted runs are not substitutes.
+Executed **2026-10-13, 12:51–12:57 UTC**. Raw console clocks use UTC+09:00. This report covers the final obfuscated 1.1.0 artifacts below. Earlier plain, interrupted, or fixture-debugging trials are not included in the verdict.
 
 ## Exact artifacts
 
-- Plugin: **274,018 bytes**, SHA-256 `1abf09736a5ea4bf1b363259a744c9ff050b7d73548db353e7066f357855c7ab`
-- Helper: **105,276 bytes**, SHA-256 `93ff6574b7af2b8bf3f72a48b4e1a0f1ab9628bbcd78a01e194f1eb416a520a9`; embedded and standalone bytes match
-- **37 plugin classes / 25 helper classes**, all in the project namespace; both JARs include LICENSE, NOTICE, and third-party notices
-- Japanese default and `ja_JP`/`en_US` bundles verified; descriptor retains `api-version: '26.2'`, `load: STARTUP`, and the required main class
+- Plugin: **242,619 bytes**, SHA-256 `54b356a6d7a4ccf5a8e2b62b8d556b033c1c76f8cfe7910e19f95c34328e177b`
+- Restore helper: **92,617 bytes**, SHA-256 `a2f17d2d2b9b08ae7bea40ec8aec4391fb7f38ddf9c711720c6aa645e5e73a4f`; embedded and standalone bytes match
+- **41 plugin classes / 27 helper classes**, all under the project namespace
+- Japanese default, both `ja_JP` and `en_US` message bundles, the required plugin entry point, and `api-version: '26.2'` were verified
+- The release JAR hashes were rechecked after the run and remained unchanged
 
-[Sanitized artifact inspection](test-evidence/artifact-inspection.json). This public report retains measured outcomes; raw console logs, temporary filesystem paths, process IDs, and restore-job identifiers are excluded.
+[Sanitized artifact inspection](test-evidence/artifact-inspection.json). This curated report contains no raw console/helper logs, absolute fixture paths, user log data, process identifiers, or restore-job identifiers.
 
 ## Environment and matrix
 
-Linux amd64, Temurin Java 25.0.4.1+1, sequential 256–768 MiB JVMs, generated flat-world fixtures, localhost ports 25581–25587, offline authentication, view/simulation distance 2. No player joined. Minecraft EULA approval was obtained before startup. Existing Paper/Purpur baselines were copied; Spigot fixtures were newly initialized from official BuildTools #201 output. Every server hash was rechecked. [Provenance](ENVIRONMENT-VERIFICATION.md)
+Linux amd64, Temurin Java **25.0.4.1+1**, 256–768 MiB JVMs, at most two independent server variants running concurrently, isolated generated worlds, localhost-only offline-mode servers, no players. Existing authorized disposable 1.0.0 baseline trees were copied into completely new directories; no original 1.0.0 artifact, world, backup, or state journal was modified. All six server hashes were checked against the pinned provenance before startup. Minecraft EULA approval was obtained before testing.
 
-| Exact server | Cycle | Manifest entries | Verified uncompressed bytes |
+| Exact server | Full cycle | Manifest entries verified | Uncompressed bytes verified |
 |---|---|---:|---:|
-| Paper 26.2 #133 | PASS | 491 | 244,886,303 |
-| Paper 26.3 #178 | PASS | 491 | 233,183,613 |
-| Purpur 26.2 #2633 | PASS | 507 | 250,862,644 |
-| Purpur 26.3 #2648 (experimental) | PASS | 507 | 239,106,384 |
-| Spigot 26.2, 4648-Spigot-8db49a2-96ae8cd | PASS | 194 | 188,417,850 |
-| Spigot 26.3, 4663-Spigot-bed90fc-c4db4c3 | PASS | 188 | 186,804,591 |
+| Paper 26.2 #133 | PASS | 487 | 244,243,257 |
+| Paper 26.3 #178 | PASS | 487 | 232,538,404 |
+| Purpur 26.2 #2633 | PASS | 503 | 250,217,431 |
+| Purpur 26.3 #2648 (experimental) | PASS | 503 | 238,461,167 |
+| Spigot 26.2, 4648-Spigot-8db49a2-96ae8cd | PASS | 194 | 188,386,510 |
+| Spigot 26.3, 4663-Spigot-bed90fc-c4db4c3 | PASS | 188 | 186,773,232 |
 
-For **each row**, the harness verified:
+[Server provenance](ENVIRONMENT-VERIFICATION.md) · [Spigot provenance](SPIGOT-COMPATIBILITY.md)
 
-1. Final plugin enabled; Japanese help/status/list responded. Paper 26.2 omitted the language key to check the Japanese default.
-2. A full backup passed independent ZIP CRC, every manifest file size/SHA-256, marker/world/library coverage, and exact backed-up plugin-hash checks.
-3. After changing the marker, preview and confirmation reached `WAITING_FOR_MANUAL_STOP`. The JVM stayed alive at least **5 seconds**, and overworld time advanced **101 ticks**. Japanese status said manual stop was pending. No stage, rollback, receipt, or normal-stop marker existed yet.
-4. Reserved-archive deletion preview and a new backup were refused; current data remained unchanged.
-5. An explicit fixture-console `stop` returned **0**. The normal-stop authorization existed; the helper completed `SUCCESS`, restored the original marker, and preserved the modified original in rollback.
-6. The server remained stopped until manual restart, then reached `Done`, showed **actual green Japanese success text**, consumed the receipt, retained the final plugin hash, and listed the backup. Final stop returned **0**.
+For **each row**, the console harness verified:
 
-The table and assertions above summarize the six measured cycles. Spigot's pipe console used its supported `-Djansi.passthrough=true`; without ANSI-capable output a host console may strip colors. The observer checks active color at the text itself. Purpur's multiline reset issue was fixed, and all six cycles reran on the final hash.
+1. The exact final 1.1.0 plugin enabled; Japanese help, status, and an initially empty catalogue responded. Paper 26.2 omitted the language key to test the Japanese default.
+2. Calling delete confirmation without a deletion preview was refused and preserved the archive.
+3. Two generated backups were reduced to one by a normal preview and confirmation. Deleting the remaining good backup required the explicit Japanese warning about leaving zero recovery points and another confirmation.
+4. After confirmed last deletion, both status and list truthfully reported zero backups. A new backup could be created immediately afterward.
+5. The recreated full backup passed independent ZIP CRC, every manifest file size and SHA-256, world/library payload, marker, and exact embedded-plugin-hash checks.
+6. A restore-reserved last backup could not be deleted, including through a deletion confirmation prepared before reservation. Backup creation while reserved was also refused. Expected protections emitted no plugin stack trace.
+7. After reservation, the JVM remained running for at least five seconds and world time advanced. No stage, rollback, normal-stop authorization, or success receipt existed before explicit fixture-console `stop`.
+8. The explicit manual stop exited **0**. The helper reached `SUCCESS`, restored the original marker, and preserved the changed original in rollback. The server did not automatically restart.
+9. A manual restart displayed **green Japanese verified-success text**, consumed the success receipt, retained the exact final plugin hash, and listed the restored backup. The final stop exited **0**.
 
-Journals use format 2, `MANUAL_NORMAL_STOP`, and no automatic deadline. Five seconds verifies waiting behavior, not indefinite-wait endurance. A normal shutdown path does not establish human intent: another exit that runs that path can also authorize restore after reservation. Automatic restart must be disabled; cancel an unwanted reservation before stopping.
+Spigot's captured console used its supported `-Djansi.passthrough=true` option. Color checks interpret the active ANSI foreground at the success text itself; a terminal or host panel may strip ANSI codes.
 
-## Additional final-artifact checks
+## Additional Paper 26.2 checks
 
-**Confirmed cancellation, Paper 26.2:** two confirmed reservations were cancelled; same-JVM re-reservation worked. After normal stop, both remained cancelled, without restore/rollback/receipt and with the modified marker intact. Retrying an old cancelled helper while stopped refused with exit **3**. Restart did not falsely claim success; a fresh reservation subsequently restored successfully.
+**Japanese restore cancellation:** a confirmed reservation was cancelled before stopping. The live marker stayed unchanged and no success receipt was created. Reusing the old restore confirmation was refused, and a fresh reservation in the same JVM successfully completed the normal restore cycle.
 
-**English/scheduling/retention:** `en_US` help, status, list, validation, preview, confirmed reservation, waiting status, cancellation, and stale-confirmation refusal passed. A real one-minute schedule produced an independently verified archive in **66.99 seconds**. Retention count **2** kept exactly two generated ZIPs after each of three manual backups and removed **2** prior generated archives. Automatic mode was disabled, retention reset to 20, fixture language restored to Japanese, and stop returned **0**.
+**English last-backup deletion and expiry:** help and direct-confirmation refusal were checked. A warned deletion preview expired after the fixture's 15-second confirmation window; confirmation after expiry was refused without deleting the archive. A fresh warned confirmation then deleted the last backup, status/list reported zero, and backup creation worked afterward.
 
-The first extended attempt safely refused a concurrently changing Spark/JFR temporary file. That incomplete attempt is a separate negative test outcome, not the complete extended pass. Only the subsequent extended/crash fixtures excluded `plugins/spark/tmp/**`; no production default or source-change check changed. The six main cycles did not add this exclusion.
+**Changed lastness:** an ordinary non-last deletion preview was created, then its generated sibling archive and metadata were moved outside the test backup store to model another administrator changing the store. The old confirmation did not delete the now-last archive. The console displayed the explicit last-backup warning and requested a fresh confirmation. Only the second explicit confirmation removed it. Expected expiry, stale-state, and protection paths produced no plugin stack trace.
 
-**Crash refusal:** SIGKILL of a separately generated reserved Paper fixture returned **−9** without a normal-stop marker. The helper reached `FAILED_BEFORE_SWAP`: no stage, rollback, receipt, or marker rollback. Restart displayed a **red Japanese failure**, never success, and final stop returned **0**.
+**Unexpected I/O remains diagnosable:** write access to the generated archive directory was temporarily removed. Confirmed deletion preserved the backup, reported failure, and logged the expected `AccessDeniedException` with a stack trace. Permissions were restored immediately afterward. This deliberate diagnostic test is not a product failure.
 
-All seven localhost ports were verified closed after the tests. Interrupted and superseded attempts are excluded from the final pass verdict.
+**Retention and real scheduling:** count retention was set to **1**, with an intentionally impossible **1-byte** archive limit. A newly created valid backup replaced the older one while retaining one recovery point despite exceeding the byte limit. A real one-minute automatic schedule then produced a backup in **66.90 seconds**, with label `automatic`, and again retained exactly one valid archive. Automatic mode was disabled after testing. Count retention was reset to 20 and byte retention disabled.
 
-## Limits and reproduction
+**English restore cancellation:** the remaining backup was reserved for restore, deletion was refused, and cancellation completed. A stale restore confirmation was refused, no success receipt was created, and status/list continued to show the remaining archive. Final stop exited **0**.
 
-These real headless tests cover the exact builds/artifact, not future versions or production load. No client GUI/click/permission test, external webhook, transactional database, network filesystem, power-loss, long-wait, or byte-retention runtime test is claimed. Live backup is best-effort; the Spark refusal illustrates concurrent-writer limits. Logs retain isolated-network authentication/version-query failures, upstream/JDK warnings, and Paper logger advice; these did not block the final results. See [overall tests and limits](../TEST-RESULTS.md).
+All six remaining archives, including the automatic archive, also passed an independent post-stop ZIP/manifest/hash verification. Logs and Spark temporary payloads were absent. Server/world locks were released. Ports **25581–25587 were all closed** at completion.
 
-[Reproduction scripts and EULA/setup requirements](../tools/runtime-tests/README.md). The baseline-seeding utility was syntax-checked; this run used initialized Paper/Purpur baselines and fresh Spigot fixtures. The public distribution contains this summary and sanitized artifact metadata, with no raw console/helper logs, temporary paths, job identifiers, server JARs, worlds, backup ZIPs, credentials, or authorization journals. Disposable baselines, backups, and rollback trees are excluded.
+## Fixture adjustments and limits
+
+All final fixtures were configured correctly **before startup**, and no configuration correction or source change occurred during the run. The fixture-only settings were a 15-second confirmation window, disabled empty-world pause for deterministic world-ticking assertions, and exclusion of actively written `plugins/spark/tmp/**` files. These are test settings, not a change to production defaults or a relaxation of changed-source verification. Full live backups remain best-effort; transactional data still requires quiescence.
+
+The run covers these exact final artifacts and six exact server builds, not future builds, production load, or unlimited waiting. No real Minecraft player joined. GUI clicks and GUI-only delete cancellation, mixed-actor/player permission flows, Discord delivery, network filesystems, power loss, and a new final-artifact SIGKILL scenario were **not** established by this console suite. Static/unit workflow and safety checks are documented separately in [overall test results](../TEST-RESULTS.md). Ordinary startup authentication/version-check network warnings were present in isolated logs and did not prevent the measured outcomes.
+
+Restore remains an **offline operation after a committed reservation and JVM exit**. There is no live/restartless restore claim. An orderly fault shutdown can also reach the normal shutdown path; disable host automatic restart and cancel an unwanted reservation before stopping.
+
+## Reproduction and public evidence
+
+Use the [1.1.0 confirmed-delete harness and setup instructions](../tools/runtime-tests/CONFIRMED-DELETE-README.md), with separately obtained official server binaries and explicit Minecraft EULA acceptance. Supply the exact expected plugin hash above. The old 1.0.0 manual-stop scripts are historical coverage and are not the source of this 1.1.0 pass verdict.
+
+The public source distribution contains portable harness code and curated summaries. Raw logs, temporary paths, server JARs, generated worlds, backup ZIPs, rollback/staging trees, credentials, and authorization journals remain outside the project and are not included.

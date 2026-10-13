@@ -1,3 +1,7 @@
+# Current 1.1.0 runtime suite
+
+For the current final obfuscated 1.1.0 release, use [CONFIRMED-DELETE-README.md](CONFIRMED-DELETE-README.md), `confirmed_delete_harness.py`, and `test_confirmed_last_deletion.py`. The manual-stop 1.0.0 scripts below are retained as historical regression tooling; their old message patterns and artifact names are not the 1.1.0 release recipe.
+
 # Real-server runtime tests
 
 These Python 3 scripts use **disposable local fixtures only**. Never point them at a production server, personal world, or an existing directory you want modified. The suite starts localhost-only offline-mode servers, creates and restores complete backup ZIPs, keeps rollback directories, tests cancellation, and deletes generated archives under its count-retention test. The separate crash test deliberately sends SIGKILL to its own generated server process. No server JAR, world, backup archive, credential, or authorization journal is distributed here.

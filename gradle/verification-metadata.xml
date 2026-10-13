@@ -1,0 +1,394 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<verification-metadata xmlns="https://schema.gradle.org/dependency-verification" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="https://schema.gradle.org/dependency-verification https://schema.gradle.org/dependency-verification/dependency-verification-1.3.xsd">
+   <configuration>
+      <verify-metadata>true</verify-metadata>
+      <verify-signatures>false</verify-signatures>
+   </configuration>
+   <components>
+      <component group="com.google.code.gson" name="gson" version="2.11.0">
+         <artifact name="gson-2.11.0.jar">
+            <sha256 value="57928d6e5a6edeb2abd3770a8f95ba44dce45f3b23b7a9dc2b309c581552a78b" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="gson-2.11.0.pom">
+            <sha256 value="c0e547bea998888e6e25c5886a90e762272bc88b5275343dd2c05ded6ca2e360" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.code.gson" name="gson" version="2.14.0">
+         <artifact name="gson-2.14.0.jar">
+            <sha256 value="2cbd119bf1961c28788310963dc80ba65f58cdeec1dd139c8bdb1240faa2c36f" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="gson-2.14.0.pom">
+            <sha256 value="1fa0122c0e3733192642861c36be4c6f799a795327a23bdd2922691b6e9ba480" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.code.gson" name="gson-parent" version="2.11.0">
+         <artifact name="gson-parent-2.11.0.pom">
+            <sha256 value="8acb1f3b72a6f026916ac0735bad9aab0293d527edb7b365327def13a9367b7a" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.code.gson" name="gson-parent" version="2.14.0">
+         <artifact name="gson-parent-2.14.0.pom">
+            <sha256 value="82b0f6694c5758ab8bb07e05630208d50f589d4b5e04fd0a046d59cdf7ba3d1d" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.errorprone" name="error_prone_annotations" version="2.27.0">
+         <artifact name="error_prone_annotations-2.27.0.jar">
+            <sha256 value="24c923372c58e35d0b9f16a028929bb9aedc77521867c274f2bd0735df5ba1f5" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="error_prone_annotations-2.27.0.pom">
+            <sha256 value="4ca5a35d61235e16549ac346d1e34551cdf0fe27e84aa57e03cbeb255ea4e5da" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.errorprone" name="error_prone_annotations" version="2.47.0">
+         <artifact name="error_prone_annotations-2.47.0.pom">
+            <sha256 value="d80c889a4a6f711f6945fbee79e05ec247b178a567e9d5abf58eb26ebf0a0752" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.errorprone" name="error_prone_annotations" version="2.48.0">
+         <artifact name="error_prone_annotations-2.48.0.jar">
+            <sha256 value="b49c5c958316ed67a09c699dda9aa749caf434d51d863dea599ef36a49b9c855" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="error_prone_annotations-2.48.0.pom">
+            <sha256 value="189e09ad0489c325e90daaa9d5c8f406330602fa366609bca07cbcdad03ab9da" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.errorprone" name="error_prone_parent" version="2.27.0">
+         <artifact name="error_prone_parent-2.27.0.pom">
+            <sha256 value="fa81829d049559df6927f9c9a6fd6bbd09f8b50e6d4736ae72c8300b6c3d7654" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.errorprone" name="error_prone_parent" version="2.47.0">
+         <artifact name="error_prone_parent-2.47.0.pom">
+            <sha256 value="2368a990c7a63095e1d0d44459d5a4092f0eb31f8562bd12cdf0e1c877b6a685" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.errorprone" name="error_prone_parent" version="2.48.0">
+         <artifact name="error_prone_parent-2.48.0.pom">
+            <sha256 value="b33fa8a45c9f1794a5008c0b2d83a84eb28b5d0117a6d156f003f9f09be7410f" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.guava" name="failureaccess" version="1.0.3">
+         <artifact name="failureaccess-1.0.3.jar">
+            <sha256 value="cbfc3906b19b8f55dd7cfd6dfe0aa4532e834250d7f080bd8d211a3e246b59cb" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="failureaccess-1.0.3.pom">
+            <sha256 value="c54beff37f6d42d43e14722d54a522c9ad51ef97fc5b79277e62a3ebf882f3bb" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.guava" name="guava" version="33.6.0-jre">
+         <artifact name="guava-33.6.0-jre.jar">
+            <sha256 value="dc573e1fca4fd5454f4a5fd3d7da2df03002876a4175bafc14a95980dd7713b3" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="guava-33.6.0-jre.module">
+            <sha256 value="2baf73ce839ae48e4b9e0083e256b0e58fc3bf8fc78fc3fbe797bbc89011216e" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="guava-33.6.0-jre.pom">
+            <sha256 value="b45b78944280054311c53da9270809fb40dcabc408ce66ce55730099b4f57d32" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.guava" name="guava-parent" version="26.0-android">
+         <artifact name="guava-parent-26.0-android.pom">
+            <sha256 value="f8698ab46ca996ce889c1afc8ca4f25eb8ac6b034dc898d4583742360016cc04" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.guava" name="guava-parent" version="33.4.0-android">
+         <artifact name="guava-parent-33.4.0-android.pom">
+            <sha256 value="7220ede61026596fbc720ee4b93246fa2d14f328058532b59ef053de397c7d83" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.guava" name="guava-parent" version="33.6.0-jre">
+         <artifact name="guava-parent-33.6.0-jre.pom">
+            <sha256 value="374bd31f61b1cf612bee9ab2e4d70bbdf77dd85a49b431f809d4fbdc901f2dd4" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.guava" name="listenablefuture" version="9999.0-empty-to-avoid-conflict-with-guava">
+         <artifact name="listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar">
+            <sha256 value="b372a037d4230aa57fbeffdef30fd6123f9c0c2db85d0aced00c91b974f33f99" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.pom">
+            <sha256 value="18d4b1db26153d4e55079ce1f76bb1fe05cdb862ef9954a88cbcc4ff38b8679b" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.google.j2objc" name="j2objc-annotations" version="3.1">
+         <artifact name="j2objc-annotations-3.1.jar">
+            <sha256 value="84d3a150518485f8140ea99b8a985656749629f6433c92b80c75b36aba3b099b" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="j2objc-annotations-3.1.pom">
+            <sha256 value="14570838500034fc1b47c8205ce1c9d6b255c1ccdd2d1afdcdcbf75e89b24a33" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.guardsquare" name="proguard-base" version="7.10.0">
+         <artifact name="proguard-base-7.10.0.jar">
+            <sha256 value="022854eb4c6f4bd761b2e3ff19d832e98227ff498fd8fcc788b313f55810a555" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="proguard-base-7.10.0.module">
+            <sha256 value="478992ac4b986d1cba08fa06dcb91498e7b9bf21d472b90d978141d77bcd1855" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="proguard-base-7.10.0.pom">
+            <sha256 value="cdc4adbae7957b85d6623d14051e577c23d97e849c6b7070ecb096ddf4a160b8" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="com.guardsquare" name="proguard-core" version="9.4.0">
+         <artifact name="proguard-core-9.4.0.jar">
+            <sha256 value="7af7c47c173711aca9edee7482ec27b33eb0a20345279d88022cb34f71710407" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="proguard-core-9.4.0.module">
+            <sha256 value="b0a9de380efbfb2b84edcf3b8181e967d392c66fc6538ec6586aef793b02faff" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="proguard-core-9.4.0.pom">
+            <sha256 value="94b04c6940555870c3e70ff1519bb575a61a5fd20b9a7073917eb421a4cd56f9" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="io.netty" name="netty-bom" version="4.2.3.Final">
+         <artifact name="netty-bom-4.2.3.Final.pom">
+            <sha256 value="97d9f19e0fec91acd76feb51184020c7166a20a31b8e486c69bbc7e575938204" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="net.md-5" name="bungeecord-chat" version="1.21-R0.4">
+         <artifact name="bungeecord-chat-1.21-R0.4.jar">
+            <sha256 value="3bade7edb09149aff360836012b5e8b469416bed8edd4f63bda2cdcce3d450ca" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="bungeecord-chat-1.21-R0.4.pom">
+            <sha256 value="dc974d1f12e14d570edb8fa189ab75d3cae239ada02e4ba4a53f66c37c7b1ef2" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="net.md-5" name="bungeecord-dialog" version="1.21-R0.4">
+         <artifact name="bungeecord-dialog-1.21-R0.4.jar">
+            <sha256 value="f478dd41a852136c93b94b339b310f165f824f85b478ebe3c8081bd21044b87e" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="bungeecord-dialog-1.21-R0.4.pom">
+            <sha256 value="ed9c507c3fffe774319942373e8880a706d26c6f7f07f8eddad92a8bbb2bf236" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="net.md-5" name="bungeecord-parent" version="1.21-R0.4">
+         <artifact name="bungeecord-parent-1.21-R0.4.pom">
+            <sha256 value="447f45f0e93b735f5c247be08a1a33f0c18287d47d183fff58da8d6ace0dd53e" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="net.md-5" name="bungeecord-serializer" version="1.21-R0.4">
+         <artifact name="bungeecord-serializer-1.21-R0.4.jar">
+            <sha256 value="0552eac3de15c1ed4d3495a8a6016b50f5502cf669b46f0ca4669f9940b85c71" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="bungeecord-serializer-1.21-R0.4.pom">
+            <sha256 value="89a428589b460efe3b775d81ba2137f45b345f0dcc1ce176a01e8b81bd3a0400" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.apache.logging.log4j" name="log4j" version="2.26.1">
+         <artifact name="log4j-2.26.1.pom">
+            <sha256 value="ea4705725fd94bf5debe2911d4ea7af20898603f68354e64b2461a0f249e445d" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.apache.logging.log4j" name="log4j-api" version="2.26.1">
+         <artifact name="log4j-api-2.26.1.jar">
+            <sha256 value="f1810a4704ccce019d02bba029dc02a4f2ac0c997f647b465e7d409c1927f822" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="log4j-api-2.26.1.module">
+            <sha256 value="5ed93f6fb5334bf7ee52943d1a654bc3a1f3f10765ae2fd4bbd387333be6678a" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="log4j-api-2.26.1.pom">
+            <sha256 value="c8ab868f9c532233bd12f311cea90a3f6de65ea07a7aa470c3e2bbf83b5c79fb" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.apache.logging.log4j" name="log4j-bom" version="2.26.1">
+         <artifact name="log4j-bom-2.26.1.pom">
+            <sha256 value="4415ad189dd04db54958a43e23b37cc397a1edee9e888214b8bd47fbe819072e" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.apache.logging.log4j" name="log4j-core" version="2.26.1">
+         <artifact name="log4j-core-2.26.1.jar">
+            <sha256 value="2ec8c3bf5a6d7c89be8620116a2fc973f7dda1ad0261ad393c4d4726edfd3dcb" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="log4j-core-2.26.1.module">
+            <sha256 value="03bfd8adbe306ac46001ec9de668f8e5d24f6659f212fc64e62a1b672a5a2f6a" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="log4j-core-2.26.1.pom">
+            <sha256 value="1a3fd9a4467c3ab9b127e7141bef129b62428fe132f7f925c3af7f524dd7a8b5" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.jetbrains" name="annotations" version="13.0">
+         <artifact name="annotations-13.0.jar">
+            <sha256 value="ace2a10dc8e2d5fd34925ecac03e4988b2c0f851650c94b8cef49ba1bd111478" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="annotations-13.0.pom">
+            <sha256 value="965aeb2bedff369819bdde1bf7a0b3b89b8247dd69c88b86375d76163bb8c397" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.jetbrains" name="annotations" version="26.0.1">
+         <artifact name="annotations-26.0.1.jar">
+            <sha256 value="2037be378980d3ba9333e97955f3b2cde392aa124d04ca73ce2eee6657199297" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="annotations-26.0.1.module">
+            <sha256 value="c7f9e349b34df8b211470e229862449c3cc13cbc1e78c79b297a374727b2e605" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="annotations-26.0.1.pom">
+            <sha256 value="90406e283907442ab3f3c65fb6a3b6e517482cd6f863081ea7bd2c82010dac57" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.jetbrains.kotlin" name="kotlin-metadata-jvm" version="2.4.0">
+         <artifact name="kotlin-metadata-jvm-2.4.0.jar">
+            <sha256 value="9aadc51c588e76c8cf3d83d4090e46a4b687f2edaa1fdf65aa9fe44223294927" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="kotlin-metadata-jvm-2.4.0.pom">
+            <sha256 value="72199391f8fc7277aad65de8c0ddf189e933ba93d7c36d43041b8456a3c84c29" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.jetbrains.kotlin" name="kotlin-stdlib" version="1.8.20">
+         <artifact name="kotlin-stdlib-1.8.20.jar">
+            <sha256 value="4395647b1961d9fb730a34e8dbe56c293157bc0759004cca63d9b5ee6653e5c7" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="kotlin-stdlib-1.8.20.pom">
+            <sha256 value="c9c1efc4ba4b46c632e2a21e693258a3eced07ebeaa00af4d3c346d3990b201e" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.jetbrains.kotlin" name="kotlin-stdlib" version="2.4.0">
+         <artifact name="kotlin-stdlib-2.4.0.jar">
+            <sha256 value="ccb14ff83fabcb11458b798dbc9824748ccdffeec79c9aba789e6ed1cda86b1c" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="kotlin-stdlib-2.4.0.module">
+            <sha256 value="c24a47dcbd9295d776f443be41d77ac245309601ed053711dee2b0254be02db6" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="kotlin-stdlib-2.4.0.pom">
+            <sha256 value="8194ff79a9ee24a7fa3f74a6b179c04a1859de8b987a4f0983056e59451721de" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.jetbrains.kotlin" name="kotlin-stdlib-common" version="1.8.20">
+         <artifact name="kotlin-stdlib-common-1.8.20.jar">
+            <sha256 value="fa20188abaa8ecf1d0035e93a969b071f10e45a1c8378c314521eade73f75fd5" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="kotlin-stdlib-common-1.8.20.pom">
+            <sha256 value="605591b89b372127e6b29c69325fa2f6a8c46f468c45d09410e78eb59fc80a17" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.jetbrains.kotlin" name="kotlin-stdlib-jdk7" version="1.8.20">
+         <artifact name="kotlin-stdlib-jdk7-1.8.20.jar">
+            <sha256 value="af1ec40c3b951afdcc0c2a0173c7b81763c5281c2d5bafbf0a8544a24c5dcc0c" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="kotlin-stdlib-jdk7-1.8.20.pom">
+            <sha256 value="3622d106578cddcc0a9ec20f8ce815f7f49ff542f640228d2141fcaf80616b06" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.jetbrains.kotlin" name="kotlin-stdlib-jdk8" version="1.8.20">
+         <artifact name="kotlin-stdlib-jdk8-1.8.20.jar">
+            <sha256 value="e398b67977622718bf18ff99b739c7d9da060f33fb458a2e25203221c16af010" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="kotlin-stdlib-jdk8-1.8.20.pom">
+            <sha256 value="3a462214a336e995687769531b1e37b0c81d8e10c9949cd5ea7ae1d7803a0232" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.joml" name="joml" version="1.10.8">
+         <artifact name="joml-1.10.8.jar">
+            <sha256 value="bf19510145178df82cd3bd37edd514c13f411531ec5545299fd3abcbc98fe7c2" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="joml-1.10.8.module">
+            <sha256 value="827732f57b3355f5bcdb5baa997338aac9c7d4483deba560a7575231239ee315" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="joml-1.10.8.pom">
+            <sha256 value="80ba8dd6e9c55594ee473dfccc14c6788d2e75410df75b02ab4d8a103c2d5f2c" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.json" name="json" version="20260719">
+         <artifact name="json-20260719.jar">
+            <sha256 value="c243f45f9590c12694a4142ed3f07fc70dfb71e4daebd05ae234bf92a2da92a6" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="json-20260719.pom">
+            <sha256 value="f1505d95d0416e2b2e239d19c278425f6cf8533e89958e8e0b4bcd7c79689771" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.jspecify" name="jspecify" version="1.0.0">
+         <artifact name="jspecify-1.0.0.jar">
+            <sha256 value="1fad6e6be7557781e4d33729d49ae1cdc8fdda6fe477bb0cc68ce351eafdfbab" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="jspecify-1.0.0.module">
+            <sha256 value="d307ca77a54e18ac1ef1aaed4e5bbe014bd2f49f29e1d2f813e47c278283195b" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="jspecify-1.0.0.pom">
+            <sha256 value="cdab929a3b95211f43d2090c5e2d0dfe8465960e378bc32b35841dab324433a6" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.sonatype.oss" name="oss-parent" version="7">
+         <artifact name="oss-parent-7.pom">
+            <sha256 value="b51f8867c92b6a722499557fc3a1fdea77bdf9ef574722fe90ce436a29559454" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.sonatype.oss" name="oss-parent" version="9">
+         <artifact name="oss-parent-9.pom">
+            <sha256 value="fb40265f982548212ff82e362e59732b2187ec6f0d80182885c14ef1f982827a" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.spigotmc" name="spigot-api" version="26.2-R0.1-20260915.151451-13">
+         <artifact name="spigot-api-26.2-R0.1-20260915.151451-13.jar">
+            <sha256 value="8c7bd2071d8fb85afa1331b3aa240a8507a73b5f661fa7084edcd06a2d9725f8" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="spigot-api-26.2-R0.1-20260915.151451-13.pom">
+            <sha256 value="c9b9ea3fa2ea70fdfbe27ff13f290e24a8fa1f83d0f6b8124a8e8b1b9118cff7" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.yaml" name="snakeyaml" version="2.6">
+         <artifact name="snakeyaml-2.6.jar">
+            <sha256 value="c8f7a98e7394adda02f6317249710e4d1b4c7a25aa8c7eace0c2eea52eb8bf85" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+         <artifact name="snakeyaml-2.6.pom">
+            <sha256 value="2773b0e948964d21e37b0e1dcf39025e627b873e0ce6aa2a47e23c374303e0c4" origin="Reviewed build dependency from configured official repository" />
+         </artifact>
+      </component>
+      <component group="org.apache.groovy" name="groovy-bom" version="4.0.27">
+         <artifact name="groovy-bom-4.0.27.module">
+            <sha256 value="d6c2254c8347b84cda84caf74914a187c2f377e4284e8d8bb3f901521810aa8b" origin="Reviewed fresh-cache download from official Maven Central over verified TLS" />
+         </artifact>
+         <artifact name="groovy-bom-4.0.27.pom">
+            <sha256 value="aa44eb52bfdfe61d27b3e450d2b348d88deaa3437ab4d9d49a84095348f9f6fb" origin="Reviewed fresh-cache download from official Maven Central over verified TLS" />
+         </artifact>
+      </component>
+      <component group="com.fasterxml.jackson" name="jackson-bom" version="2.19.2">
+         <artifact name="jackson-bom-2.19.2.pom">
+            <sha256 value="22006be70fd018099e99c6c27ac0982320f3a0f3c2ce053c55703579a5eea303" origin="Reviewed fresh-cache download from official Maven Central over verified TLS" />
+         </artifact>
+      </component>
+      <component group="com.fasterxml.jackson" name="jackson-parent" version="2.19.3">
+         <artifact name="jackson-parent-2.19.3.pom">
+            <sha256 value="23d186c8d8cd06015d022c710c715423d660d49e2973b15870b029cc26018682" origin="Reviewed fresh-cache download from official Maven Central over verified TLS" />
+         </artifact>
+      </component>
+      <component group="jakarta.platform" name="jakarta.jakartaee-bom" version="9.1.0">
+         <artifact name="jakarta.jakartaee-bom-9.1.0.pom">
+            <sha256 value="df98e0266219fdbb82562826d79a3a20776a8ba02aa787f0f0765a538654c8a4" origin="Reviewed fresh-cache download from official Maven Central over verified TLS" />
+         </artifact>
+      </component>
+      <component group="jakarta.platform" name="jakartaee-api-parent" version="9.1.0">
+         <artifact name="jakartaee-api-parent-9.1.0.pom">
+            <sha256 value="a7702c487026802784b5797b62330a8b8d6592bf0f4737b25c67a5eac82659c0" origin="Reviewed fresh-cache download from official Maven Central over verified TLS" />
+         </artifact>
+      </component>
+      <component group="org.junit" name="junit-bom" version="5.13.4">
+         <artifact name="junit-bom-5.13.4.module">
+            <sha256 value="e959288fde1b1b050d9bc082fc786789128da5d2853091468fca504104bdf400" origin="Reviewed fresh-cache download from official Maven Central over verified TLS" />
+         </artifact>
+         <artifact name="junit-bom-5.13.4.pom">
+            <sha256 value="d7a08a99b2502f0bb68cd4e1f984f0bf69324aaa208bd0f73366c03fc3548a42" origin="Reviewed fresh-cache download from official Maven Central over verified TLS" />
+         </artifact>
+      </component>
+      <component group="org.mockito" name="mockito-bom" version="4.11.0">
+         <artifact name="mockito-bom-4.11.0.pom">
+            <sha256 value="d8531a746c988f7f68ed5f188cdea945006aea993ec5df9e524e0d27d61491da" origin="Reviewed fresh-cache download from official Maven Central over verified TLS" />
+         </artifact>
+      </component>
+      <component group="com.fasterxml" name="oss-parent" version="69">
+         <artifact name="oss-parent-69.pom">
+            <sha256 value="3856d584aaa1c8e33ce94c67244f71f6f70538a259ffe8e781761b9faaad875f" origin="Reviewed fresh-cache download from official Maven Central over verified TLS" />
+         </artifact>
+      </component>
+      <component group="org.eclipse.ee4j" name="project" version="1.0.7">
+         <artifact name="project-1.0.7.pom">
+            <sha256 value="205c039a42cbae3556efbeb04a483eb3a3cf9550bd75bf84260dc8f28218f105" origin="Reviewed fresh-cache download from official Maven Central over verified TLS" />
+         </artifact>
+      </component>
+      <component group="org.springframework" name="spring-framework-bom" version="5.3.39">
+         <artifact name="spring-framework-bom-5.3.39.module">
+            <sha256 value="f88b40e2a50333b40b42f181eee272b75ec75dd8666cb145bd90b15b97e183e3" origin="Reviewed fresh-cache download from official Maven Central over verified TLS" />
+         </artifact>
+         <artifact name="spring-framework-bom-5.3.39.pom">
+            <sha256 value="f6d481093e75767cba1ac7e1db38f8f692cbe3e38744693371a75aeb21c6148b" origin="Reviewed fresh-cache download from official Maven Central over verified TLS" />
+         </artifact>
+      </component>
+   </components>
+</verification-metadata>

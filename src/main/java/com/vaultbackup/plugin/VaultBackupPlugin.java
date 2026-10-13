@@ -2,6 +2,7 @@
 package com.vaultbackup.plugin;
 
 import com.vaultbackup.core.BackupEngine;
+import com.vaultbackup.core.BackupDeletionRefusedException;
 import com.vaultbackup.core.BackupRecord;
 import com.vaultbackup.restore.RestoreCoordinator;
 import org.bukkit.ChatColor;
@@ -51,7 +52,7 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
     private Instant nextAutomatic;
     private final Map<UUID, Boolean> autosave = new LinkedHashMap<>();
     private final Map<String, PendingRestore> pendingRestores = new HashMap<>();
-    private final Map<String, PendingDelete> pendingDeletes = new HashMap<>();
+    private final Map<String, DeleteConfirmation> pendingDeletes = new HashMap<>();
     private volatile boolean snapshotActive;
     private volatile String armedJob;
     private boolean restoreGuardStartupFailure;
@@ -425,33 +426,60 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             try { restores.cancel(entry.getValue().token); } catch (Exception e) { getLogger().warning(text("restore.expired")); }
             return true;
         });
-        pendingDeletes.entrySet().removeIf(entry -> !entry.getValue().expires.isAfter(now));
+        pendingDeletes.entrySet().removeIf(entry -> !entry.getValue().expires().isAfter(now));
     }
-    void requestDelete(CommandSender sender, String id) {
-        if (!allowed(sender,"delete")) return;
-        if (busy()) { tell(sender,text("job.busy",operation()),false); return; }
-        if (find(id).isEmpty()) { tell(sender,text("list.unknown"),false); return; }
-        if (protectedBackup(id)) { tell(sender,text("delete.protected"),false); return; }
-        pendingDeletes.put(actor(sender), new PendingDelete(id, Instant.now().plusSeconds(settings.confirmationSeconds())));
+    boolean requestDelete(CommandSender sender, String id) {
+        if (!allowed(sender,"delete")) return false;
+        pendingDeletes.remove(actor(sender));
+        if (busy()) { tell(sender,text("job.busy",operation()),false); return false; }
+        if (find(id).isEmpty()) { tell(sender,text("list.unknown"),false); return false; }
+        if (protectedBackup(id)) { tell(sender,text("delete.protected"),false); return false; }
+        boolean warnLast = DeleteConfirmation.needsLastBackupWarning(catalogue, id);
+        if (warnLast) tell(sender,text("delete.last.warning"),false);
+        pendingDeletes.put(actor(sender), new DeleteConfirmation(id,
+                Instant.now().plusSeconds(settings.confirmationSeconds()), warnLast));
         tell(sender,text("delete.preview", id, settings.confirmationSeconds()),false);
+        return true;
+    }
+    boolean lastDeleteWarning(CommandSender sender, String id) {
+        DeleteConfirmation pending = pendingDeletes.get(actor(sender));
+        return pending != null && pending.matches(id, Instant.now()) && pending.lastBackupWarning();
     }
     void cancelDelete(CommandSender sender, String id) {
-        PendingDelete pending = pendingDeletes.get(actor(sender));
-        if (pending != null && pending.id.equals(id)) pendingDeletes.remove(actor(sender));
+        DeleteConfirmation pending = pendingDeletes.get(actor(sender));
+        if (pending != null && pending.id().equals(id)) pendingDeletes.remove(actor(sender));
         tell(sender,text("delete.cancelled"),true);
     }
     void delete(CommandSender sender, String id) {
         if (!allowed(sender,"delete")) return;
         expirePending();
-        PendingDelete pending = pendingDeletes.get(actor(sender));
-        if (pending == null || !pending.id.equals(id)) { tell(sender,text("delete.request", id),false); return; }
+        DeleteConfirmation pending = pendingDeletes.get(actor(sender));
+        if (pending == null || !pending.matches(id, Instant.now())) { tell(sender,text("delete.request", id),false); return; }
         if (protectedBackup(id)) { tell(sender,text("delete.protected"),false); return; }
         if (!begin(sender,"operation.delete")) return;
         pendingDeletes.remove(actor(sender));
-        submit(() -> { try { engine.delete(id, restores.protectedBackupIds()); updateCatalogue();
-                main(() -> { tell(sender,text("delete.done", id),true); if (sender instanceof Player p) menus.openList(p,0); });
-            } catch (Exception error) { reportFailure(sender,"job.delete",error); }
-            finally { main(this::finish); } });
+        submit(() -> { try { engine.delete(id, restores.protectedBackupIds(), pending.lastBackupWarning()); updateCatalogue();
+                boolean noneRemain = catalogue.isEmpty();
+                main(() -> { tell(sender,text("delete.done", id),true);
+                    if (noneRemain) tell(sender,text("delete.noneleft"),false);
+                    if (sender instanceof Player p) menus.openList(p,0); });
+            } catch (Exception error) {
+                DeleteFeedback.report(error, reason -> main(() -> {
+                    // A disconnected player cannot receive this new warning. Do not leave
+                    // a warned token that could be consumed after reconnecting.
+                    if (sender instanceof Player p && !p.isOnline()) return;
+                    tell(sender,text(DeleteFeedback.messageKey(reason)),false);
+                    if (reason == BackupDeletionRefusedException.Reason.LAST_GOOD_CONFIRMATION_REQUIRED) {
+                        // An ordinary preview became stale. No deletion occurred. Record a NEW
+                        // warned confirmation; never retry deletion automatically with consent.
+                        tell(sender,text("delete.last.warning"),false);
+                        pendingDeletes.put(actor(sender), new DeleteConfirmation(id,
+                                Instant.now().plusSeconds(settings.confirmationSeconds()), true));
+                        tell(sender,text("delete.preview", id, settings.confirmationSeconds()),false);
+                        if (sender instanceof Player p) menus.deleteFinal(p,id,0);
+                    }
+                }), unexpected -> reportFailure(sender,"job.delete",unexpected));
+            } finally { main(this::finish); } });
     }
 
     void reloadSettings(CommandSender sender) {
@@ -511,5 +539,4 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         }
     }
     private record PendingRestore(String id, String token, Instant expires) {}
-    private record PendingDelete(String id, Instant expires) {}
 }

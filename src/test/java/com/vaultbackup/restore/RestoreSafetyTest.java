@@ -33,6 +33,11 @@ public final class RestoreSafetyTest {
             killedParentTest(temp.resolve("killed-parent"));
             integration(temp.resolve("success"),false);
             integration(temp.resolve("rollback"),true);
+            rollbackJournalFailureTest(temp.resolve("rollback-journal"),"ORIGINAL_MOVED",false,false);
+            rollbackJournalFailureTest(temp.resolve("installed-journal"),"VERIFYING_INSTALLED",false,false);
+            rollbackJournalFailureTest(temp.resolve("blocked-rollback-journal"),"ORIGINAL_MOVED",true,false);
+            rollbackJournalFailureTest(temp.resolve("malformed-journal"),"ORIGINAL_MOVED",false,true);
+            rollbackJournalFailureTest(temp.resolve("blocked-malformed-journal"),"ORIGINAL_MOVED",true,true);
             recoveryTest(temp.resolve("recovery"));
             System.out.println("RestoreSafetyTest: "+checks+" checks passed; disposable fixtures at "+temp);
         }catch(Throwable e){System.err.println("Test fixtures retained at "+temp);throw e;}
@@ -136,7 +141,7 @@ public final class RestoreSafetyTest {
                 check(Files.readString(root.resolve("not-in-backup.txt")).equals("PRESERVE ORIGINAL"),"rollback preserves excluded original file");
                 check(Files.readString(Path.of(job.getProperty("failed")).resolve("world/level.dat")).equals("BACKED-UP"),"failed installation retained");
                 check(!Files.exists(jobDir.resolve("receipt.properties")),"failure has no success receipt");
-                await(()->RestoreJobState.confirmedDead(jobDir,job),Duration.ofSeconds(5),"failed helper exit",null,fixture);
+                awaitConfirmedDead(jobDir,job,Duration.ofSeconds(5),"failed helper exit",fixture);
                 RestoreCoordinator coordinator=new RestoreCoordinator(root,backups,fixture.resolve("state"),helperJar);check(coordinator.startupFailure().isPresent(),"failure available for red startup notification");
             } else {
                 check(Files.readString(root.resolve("world/level.dat")).equals("BACKED-UP"),"backup data installed only after exit");
@@ -155,6 +160,55 @@ public final class RestoreSafetyTest {
             }
             check(Files.exists(backups.resolve("snapshot.zip")),"backup archive preserved");
         }finally{if(parent.isAlive()){parent.destroyForcibly();parent.waitFor();}}
+    }
+    /** Synchronous fault injection through status output; production code has no test hooks. */
+    private static void rollbackJournalFailureTest(Path f,String injectionStatus,boolean blockRollback,boolean malformedJob)throws Exception {
+        Path root=fixture(f),archive=f.resolve("backups/snapshot.zip"),state=f.resolve("state");
+        Files.writeString(root.resolve("not-in-backup.txt"),"PRESERVE ORIGINAL");String archiveHash=RestoreFiles.sha(archive);
+        Process parent=spawn("--sleeper");long pid=parent.pid();Instant start=parent.info().startInstant().orElseThrow();parent.destroyForcibly();parent.waitFor();
+        Properties report=manualJob(root,f.resolve("backups"),state,archive,pid,start);Path file=Path.of(report.getProperty("jobFile")),dir=file.getParent(),status=dir.resolve("status.properties");Properties job=RestoreFiles.load(file);
+        Path stage=Path.of(job.getProperty("stage")),rollback=Path.of(job.getProperty("rollback")),failed=Path.of(job.getProperty("failed"));
+        PrintStream output=System.out;List<String> messages=new ArrayList<>();boolean[] injected={false};IOException failure=null;
+        System.setOut(new PrintStream(output) {
+            @Override public void println(String message) {
+                super.println(message);messages.add(message);
+                if(!injected[0] && message.contains("] "+injectionStatus+":")) {
+                    try {
+                        // The status write has completed at this point, after the first move.
+                        if(malformedJob)Files.writeString(file,"bad="+(char)92+"uZZZZ\n");
+                        else {Files.delete(status);Files.createDirectory(status);}
+                        if(blockRollback) {
+                            Files.createDirectory(root);Files.writeString(root.resolve("interfering.txt"),"PRESERVE INTERFERING ROOT");
+                            Files.createDirectory(failed);Files.writeString(failed.resolve("existing.txt"),"PRESERVE EXISTING FAILED TREE");
+                        }
+                        injected[0]=true;
+                    }catch(IOException e){throw new UncheckedIOException(e);}
+                }
+            }
+        });
+        try {RestoreMain.run(new String[]{"--job",file.toString(),"--manual","--i-confirm-server-stopped"});}
+        catch(IOException e){failure=e;}
+        finally{System.setOut(output);}
+        check(injected[0],"journal fault was injected after the original root moved");
+        Throwable original=malformedJob && failure!=null?failure.getCause():failure;
+        check(malformedJob?original instanceof IllegalArgumentException:original instanceof FileSystemException fs && status.toString().equals(fs.getOtherFile()),"primary journal failure is retained");
+        check(Arrays.stream(original.getSuppressed()).filter(e->malformedJob?e instanceof IllegalArgumentException:e instanceof FileSystemException fs && status.toString().equals(fs.getOtherFile())).count()>=2,"rollback journal failures are retained as suppressed errors");
+        check(messages.stream().noneMatch(m->m.contains("] SUCCESS:")) && !Files.exists(dir.resolve("receipt.properties")),"journal failure never reports success or leaves a success receipt");
+        check(malformedJob?Files.readString(file).equals("bad="+(char)92+"uZZZZ\n") && !statusEquals(dir,"SUCCESS"):Files.isDirectory(status),"damaged journal is not silently replaced or reported successful");
+        check(RestoreFiles.sha(archive).equals(archiveHash),"journal failure preserves the backup archive");
+        if(blockRollback) {
+            check(Arrays.stream(original.getSuppressed()).anyMatch(e->e instanceof IOException && ("Refusing to replace existing path: "+failed).equals(e.getMessage())),"actual rollback move failure is retained alongside journal failures");
+            check(Files.readString(rollback.resolve("world/level.dat")).equals("ORIGINAL") && Files.readString(rollback.resolve("not-in-backup.txt")).equals("PRESERVE ORIGINAL"),"blocked rollback preserves the complete original tree");
+            check(Files.readString(root.resolve("interfering.txt")).equals("PRESERVE INTERFERING ROOT") && Files.readString(failed.resolve("existing.txt")).equals("PRESERVE EXISTING FAILED TREE"),"rollback never overwrites existing root or failed tree");
+            check(Files.readString(stage.resolve("world/level.dat")).equals("BACKUP"),"blocked rollback retains verified stage");
+        } else {
+            check(Files.readString(root.resolve("world/level.dat")).equals("ORIGINAL") && Files.readString(root.resolve("not-in-backup.txt")).equals("PRESERVE ORIGINAL"),"journal failure cannot prevent restoration of the original root");
+            check(!Files.exists(rollback),"original rollback tree is atomically returned to its root");
+            Path retained=injectionStatus.equals("ORIGINAL_MOVED")?stage:failed;
+            check(Files.readString(retained.resolve("world/level.dat")).equals("BACKUP"),"journal failure retains the staged or failed installation");
+            if(injectionStatus.equals("ORIGINAL_MOVED"))check(!Files.exists(failed),"pre-install rollback does not create a failed tree");
+            else check(!Files.exists(stage),"installed tree is preserved only in its failed location");
+        }
     }
     private static void recoveryTest(Path fixture)throws Exception {
         Files.createDirectories(fixture);Path root=Files.createDirectory(fixture.resolve("server"));Files.writeString(root.resolve("original"),"original");Path backups=Files.createDirectory(fixture.resolve("backups"));Path state=Files.createDirectory(fixture.resolve("state"));Path archive=backups.resolve("snapshot.zip");zip(archive,Map.of("new","new"),List.of());
@@ -285,7 +339,7 @@ public final class RestoreSafetyTest {
         try(RestoreJobState.Gate gate=RestoreJobState.requireLock(dir)){Files.createDirectory(dir.resolve("cancel.properties"));}
         refuses(c::cancelCommitted,"ambiguous cancellation flag cannot produce a success acknowledgment");
         check(c.protectedBackupIds().contains("snapshot") && Files.exists(f.resolve("state/active-restore.properties")),"ambiguous cancellation retains archive pin and active journal");
-        await(()->RestoreJobState.confirmedDead(dir,job),Duration.ofSeconds(10),"ambiguous cancellation fail-closed helper exit",null,f);
+        awaitConfirmedDead(dir,job,Duration.ofSeconds(10),"ambiguous cancellation fail-closed helper exit",f);
         Process retry=helper(result.jobFile(),"--manual","--i-confirm-server-stopped");check(retry.waitFor(10,java.util.concurrent.TimeUnit.SECONDS) && retry.exitValue()!=0,"manual mode also refuses ambiguous cancellation");check(Files.readString(root.resolve("world/level.dat")).equals("ORIGINAL"),"ambiguous cancellation never permits application");
     }
     private static void killedParentTest(Path f)throws Exception {
@@ -293,7 +347,7 @@ public final class RestoreSafetyTest {
         parent.destroyForcibly();check(parent.waitFor(10,java.util.concurrent.TimeUnit.SECONDS),"abrupt parent termination observed");
         await(()->statusEquals(dir,"FAILED_BEFORE_SWAP"),Duration.ofSeconds(10),"crash refusal",null,f);
         check(!Files.exists(dir.resolve("normal-stop.properties")),"crash never forges normal-stop intent");check(!Files.exists(Path.of(job.getProperty("stage"))) && Files.readString(root.resolve("world/level.dat")).equals("ORIGINAL"),"crash without normal stop does not stage or restore");
-        await(()->RestoreJobState.confirmedDead(dir,job),Duration.ofSeconds(10),"crash helper exit",null,f);
+        awaitConfirmedDead(dir,job,Duration.ofSeconds(10),"crash helper exit",f);
         RestoreCoordinator restarted=new RestoreCoordinator(root,f.resolve("backups"),f.resolve("state"),helperJar);check(restarted.startupFailure().isPresent(),"safe failed crash reservation is reported on restart");check(restarted.status().isEmpty(),"dead failed reservation is durably disarmed before startup cleanup");
         Process retry=helper(file,"--manual","--i-confirm-server-stopped");check(retry.waitFor(10,java.util.concurrent.TimeUnit.SECONDS) && retry.exitValue()==3,"startup-disarmed failed job cannot be manually resumed later");
     }
@@ -306,6 +360,21 @@ public final class RestoreSafetyTest {
     private interface Condition {boolean test()throws Exception;}
     private static void await(Condition c,Duration timeout,String label,Process parent,Path fixture)throws Exception {
         long until=System.nanoTime()+timeout.toNanos();while(System.nanoTime()<until){if(c.test())return;if(parent!=null && !parent.isAlive())throw new AssertionError("Parent exited before "+label+"; "+fixture);Thread.sleep(30);}throw new AssertionError("Timed out awaiting "+label+"; "+fixture);
+    }
+    /**
+     * The OS may remove an exiting helper between ProcessHandle.of(pid) and
+     * info().startInstant(). Production correctly refuses that uncertain sample.
+     * Only this bounded test poll retries it; an IOException is never success,
+     * and persistent uncertainty fails with the last exception as its cause.
+     */
+    private static void awaitConfirmedDead(Path dir,Properties job,Duration timeout,String label,Path fixture)throws Exception {
+        long until=System.nanoTime()+timeout.toNanos();IOException lastFailure=null;
+        while(System.nanoTime()<until) {
+            try {if(RestoreJobState.confirmedDead(dir,job))return;}
+            catch(IOException uncertain) {lastFailure=uncertain;}
+            Thread.sleep(30);
+        }
+        throw new AssertionError("Timed out awaiting "+label+"; "+fixture,lastFailure);
     }
     private static boolean statusEquals(Path dir,String expected)throws IOException{return RestoreFiles.status(dir).equals(expected);}
     private static void zip(Path destination,Map<String,String> files,List<String> dirs)throws IOException {

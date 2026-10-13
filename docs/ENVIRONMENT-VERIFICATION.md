@@ -82,7 +82,7 @@ This flush is not a filesystem snapshot and does not guarantee an atomic cross-f
 
 Paper 専用の World.save(true) から、実対象で検証する CraftServer → MinecraftServer.saveEverything(true,true,true) に移行しました。未知の反射シグネチャや失敗は安全側に拒否します。停止判定は別に hasStopped を使用しますが、保存完了の証明としては使いません。
 
-本公開版は GPL-3.0-only で無料配布します。非難読化 JAR が標準で、ProGuard は現在のビルドに使用しません。Spigot/Paper/Minecraft のクラスやサーバー JAR をプラグインへ同梱しません。[ライセンス記録](LICENSE-REVIEW.md) と THIRD-PARTY-NOTICES.md を参照してください。公開ファイル名とソースは [配布情報](../PUBLICATION-NOTES.md) を参照してください。
+本公開版は GPL-3.0-only で無料配布します。1.1.0 は ProGuard 7.10.0 で難読化した JAR が標準です。Spigot/Paper/Minecraft のクラスやサーバー JAR をプラグインへ同梱しません。[ライセンス記録](LICENSE-REVIEW.md) と THIRD-PARTY-NOTICES.md を参照してください。公開ファイル名とソースは [配布情報](../PUBLICATION-NOTES.md) を参照してください。
 
 ## Initialization results
 

@@ -1,3 +1,7 @@
+# Review history and 1.1.0 scope
+
+The sections below record the 1.0.0 safety baseline. Version 1.1.0 changes the manually confirmed last-backup deletion policy and repairs rollback diagnostic-failure handling; it also hardens and updates build tooling: explicit last-backup consent may leave zero good backups. Automatic retention and restore reservations remain protected. Final 1.1.0 review findings and regression outcomes are recorded in the new section at the end; do not treat historical assertions as current runtime results.
+
 # VaultBackup Pro security and restore safety review
 
 Review date: 13 October 2026. Scope: source review of version 1.0.0, concentrating on offline restoration, crash recovery, startup and shutdown behavior, archive paths, and administrator inventory actions. This is a focused code review, not a security certification or a guarantee against data loss. Runtime results belong in TEST-RESULTS.md; this review does not turn an untested platform or interaction into a passing test.
@@ -111,3 +115,23 @@ Inventory authorization controls remain intact: server-owned holders, owner UUID
 ### Verification limits
 
 The revised disposable-fixture test source covers confirmed cancellation followed by JVM exit, repeated cancellation, same-JVM re-reservation, old cancelled helper retries, a held job gate, invalid cancellation state, helper death, abrupt parent exit before the marker, authenticated success and rollback/recovery. Consult the final test report for what actually passed against the distributed plain helper and plugin. This reviewer did not launch a Minecraft server or touch production server data. Full-disk/directory-fsync failures at every publication point, physical power loss, Windows behavior, adversarial same-account mutation and concurrent uncooperative launches remain outside this review's demonstrated coverage.
+
+
+## Version 1.1.0 audit and fixes (13 October 2026)
+
+The confirmed manual-delete path can intentionally reach zero good backups. Permission, actor, selected archive, expiry, exclusive store lock and restore-reservation protection remain authoritative. A stale ordinary confirmation that becomes the final good backup is rejected and renewed only after the extra warning; an offline player is not treated as having received that warning. Automatic retention still retains a verified good backup. Expected confirmation requirements use typed, localized feedback; unexpected I/O retains diagnostics.
+
+Independent fault injection found that a failed status write inside the rollback catch could prevent the actual directory move back. Original data remained in the rollback tree, but the original server root could be absent. The fix isolates best-effort journal writes from physical recovery and preserves the original exception plus suppressed diagnostic/rollback errors. Tests include I/O journal loss, malformed Properties, loss after installed verification with receipt removal, and a conflicting target that must never be overwritten. The expanded restore suite has 166 passing assertions. Independent review reproduced both original failures and verified recovery after the fix. No false SUCCESS receipt is accepted.
+
+Build-only supply-chain changes: Gradle 9.8.1 with distribution SHA-256, ProGuard 7.10.0, JSON-java 20260719 in the isolated ProGuard configuration, exclusive official Spigot repository routing, and checked-in SHA-256 dependency metadata. This addresses the reviewed Gradle advisories (including CVE-2026-22865/CVE-2026-22816 and the additional 9.8.1 fixes) and avoids the affected JSON parser version. JSON parser exploit reachability through ProGuard was not established. These tools are not shaded into the runtime JAR.
+
+The initial metadata generator encountered a Gradle timestamped-snapshot duplicate-key error. Metadata was assembled from the exact resolved official-repository artifacts and required POM parents and then tested in strict verification mode. These checks detect subsequent byte changes; checksums do not themselves establish publisher identity or guarantee safe dependencies. Fresh-cache resolution exposed 13 additional BOM/parent metadata files; their exact official Maven Central SHA-256 values were added. The resulting 53 components / 93 artifact checksums retain strict verification with no trust/ignore exceptions. Reproducibility evidence is recorded separately.
+
+The final plugin and helper are independently symbol-obfuscated without shrinking or optimization. Runtime resource names, Bukkit entrypoints/callbacks, record/enum behavior, helper entrypoint and embedded-helper identity are checked against the actual obfuscated bytes. Corresponding readable GPLv3 source and obfuscation settings remain public.
+
+No unauthenticated game-client RCE, arbitrary-path write or authorization bypass was found in the reviewed paths. This is bounded review and testing, not a statement that the software has no vulnerabilities. Windows execution and real Minecraft client GUI clicks were not exercised for this revision. Runtime acceptance and reproducibility results are tracked in TEST-RESULTS.md; do not infer a pass from this review alone.
+
+Sources: [Gradle 9.8.1 security fixes](https://docs.gradle.org/9.8.1/release-notes.html), [Gradle repository advisory](https://github.com/gradle/gradle/security/advisories/GHSA-mqwm-5m85-gmcv), [Gradle script advisory](https://github.com/gradle/gradle/security/advisories/GHSA-w78c-w6vf-rw82), [JSON-java advisory](https://github.com/stleary/JSON-java/security/advisories/GHSA-ghc9-756g-vrcv).
+
+
+A fresh-cache regression run also exposed a test synchronization race: a helper can disappear between ProcessHandle lookup and start-time lookup, and the intentionally fail-closed identity check raises IOException. The test previously let that transient exception abort polling immediately. Only the test polling was changed to retry within its existing bounded deadline, retain the last error on timeout, and require an affirmative authenticated death result. Production identity checks were not weakened. The failed fixture retained original data and no false success.

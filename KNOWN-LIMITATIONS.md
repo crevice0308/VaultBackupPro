@@ -14,10 +14,12 @@
 12. 通常停止経路の認証マーカーと実 JVM 終了を両方確認します。マーカーは管理者が stop を入力した証明や全保存の完了証明ではありません。通常のシャットダウン経路に入る障害停止も対象になり得ます。SIGKILL 等のマーカーなし終了は自動復元を拒否します。
 13. 待機に自動期限はありません。ヘルパー停止・状態不明時は安全側で拒否し、予約を放置したままサーバーを再起動しないでください。ホストによる子プロセス終了にも注意してください。
 14. 古いバックアップの完全復元では、プラグイン JAR・設定も当時に戻ります。今回の改訂前のバックアップは旧自動停止方式や英語設定を復元する可能性があります。
-15. 本改訂は無料・GPL-3.0-only・非難読化です。マーケットでの審査合格や認証を意味しません。GPL は第三者の商用利用や有償再配布を禁止しません。
+15. 本改訂は無料・GPL-3.0-only で、公開ソースに対応する難読化 JAR を提供します。マーケットでの審査合格や認証を意味しません。GPL は第三者の商用利用や有償再配布を禁止しません。
 
 See TEST-RESULTS.md for measured results, not assumed coverage.
 
 Filesystem metadata: ZIP restores preserve file contents and directory structure, not POSIX ownership, ACLs, executable bits, extended attributes or hard-link relationships. Review permissions after restoration; launch Linux scripts through `sh` or restore their executable bit intentionally. Symlinks are refused rather than followed. This tool is not a filesystem-image backup.
 
 Crash durability: archive bytes and metadata are forced to storage, and Linux publication/deletion directory entries are fsynced before retention proceeds. Standard Java on Windows may not support directory fsync; metadata durability across sudden power loss is therefore platform/filesystem dependent and is not certified by these tests. Atomic rename is not a guarantee against every power-loss or storage-controller failure. Keep independent generations outside this server.
+
+Manual deletion in 1.1.0 can intentionally remove the final verified good backup after its explicit zero-backups warning and confirmation. This is irreversible through the plugin: no recovery point remains in that store. Automatic retention still preserves at least one verified good backup; deleting a restore-reserved target remains prohibited. Keep independent recovery points outside this backup store.

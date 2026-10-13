@@ -1,11 +1,11 @@
-# VaultBackup Pro 1.0.0 — Quick start
+# VaultBackup Pro 1.1.0 — Quick start
 
-Free software under GPL-3.0-only. The default JAR is not obfuscated. The accompanying source ZIP contains the corresponding source, Gradle build, tests and documentation. The plugin filename is VaultBackupPro-1.0.0.jar. Identify this exact release by its SHA-256 in TEST-RESULTS.md; older builds may also report version 1.0.0. See [publication notes](PUBLICATION-NOTES.md) for source and artifact names.
+Free software under GPL-3.0-only. The default JAR is not obfuscated. The accompanying source ZIP contains the corresponding source, Gradle build, tests and documentation. The plugin filename is VaultBackupPro-1.1.0.jar. Identify this exact release by its SHA-256 in TEST-RESULTS.md; do not rely on a filename alone to identify a binary. See [publication notes](PUBLICATION-NOTES.md) for source and artifact names.
 
 ## Install or update
 
 1. Stop your server normally and wait for its Java process to exit. Keep your existing JAR and configuration separately.
-2. Copy the packaged VaultBackupPro-1.0.0.jar into plugins. Keep only one VaultBackup Pro JAR there. Do not unzip the JAR itself or create a directory named with the .jar extension.
+2. Copy the packaged VaultBackupPro-1.1.0.jar into plugins. Keep only one VaultBackup Pro JAR there. Do not unzip the JAR itself or create a directory named with the .jar extension.
 3. Run Paper, Purpur or Spigot 26.2/26.3 with Java 25. Exact tested builds are listed in the test reports; Purpur 26.3 is experimental upstream. Folia and unrelated versions are unsupported.
 4. Backups and restore control state must be outside the server root on a suitable local filesystem. The host must allow the independent Java helper. Configuration mistakes fail closed.
 
@@ -34,10 +34,14 @@ A shutdown-path marker is not proof that the administrator typed stop or that ev
 
 The old root is retained as a rollback sibling, including files excluded from the restored backup. Keep it until you have checked the result. See docs/OFFLINE-RESTORE.md for active, uncancelled manual-helper jobs and explicit recovery. Permanently cancelled jobs cannot be resumed by a wrapper or command-line flag.
 
-A full backup includes plugin JARs and configuration. Restoring an old archive can reinstall the older automatic-stop behavior even though both versions say 1.0.0. Keep this revision outside the server root and check which JAR/config will be started.
+A full backup includes plugin JARs and configuration. Restoring an old archive can reinstall the older automatic-stop behavior or the previous deletion rules. Keep this revision outside the server root and check which JAR/config will be started.
 
 Live ZIP backups cannot make external databases or arbitrary plugin writers transactionally consistent. ZIP restores preserve contents and directory layout, not ACLs, ownership or executable bits. Backups can contain secrets: protect them and do not publish them. New Linux directories use owner-only access; Windows inherited ACLs require review.
 
 See TEST-RESULTS.md and KNOWN-LIMITATIONS.md. This revision's real-client GUI/player testing, Windows execution, real Discord delivery and hardware power-loss scenarios are not established by Linux server tests. There is no DRM or activation service. GPLv3 permits commercial use and paid redistribution subject to its terms; our distribution is free of charge.
 
 If a backup reports `Source changed during backup`, that attempt was refused rather than published as a complete snapshot. The runtime tests encountered a changing Spark JFR temporary recording under plugins/spark/tmp. Stop the profiler normally, or explicitly exclude only disposable data you do not need restored (for example `plugins/spark/tmp/**`). Exclusions affect the restored tree; never broadly exclude worlds or databases merely to hide a warning.
+
+## Deleting your final backup
+
+Manual deletion can remove the final verified good backup after an explicit warning and confirmation. You will have zero recovery points in this backup store afterward; the plugin cannot restore from a backup you deleted. There is no bypass for a backup reserved for restoration. Automatic count/size retention still preserves at least one verified good backup. If another backup disappears between preview and confirmation, the plugin warns again and requires fresh confirmation before deleting the now-last backup.

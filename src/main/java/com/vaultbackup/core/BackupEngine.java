@@ -219,15 +219,27 @@ public final class BackupEngine {
         }
     }
 
-    /** Deletes a verified backup, unless reserved or the last verified good backup. */
+    /** Conservative entry point: removing the final recovery point needs explicit manual consent. */
     public synchronized void delete(String id, Set<String> protectedIds) throws IOException {
+        delete(id, protectedIds, false);
+    }
+
+    /**
+     * Deletes a verified backup. allowLastGood is only for a manual confirmation that
+     * explicitly warned that no verified recovery point would remain. Never use it
+     * for automatic retention. Restore reservations are protected in either case.
+     * The current verified store, not a UI catalogue snapshot, decides under lock.
+     */
+    public synchronized void delete(String id, Set<String> protectedIds, boolean allowLastGood) throws IOException {
         validateId(id);
         Set<String> protectedCopy = Set.copyOf(Objects.requireNonNull(protectedIds));
-        if (protectedCopy.contains(id)) throw new IOException("Backup is reserved for restore: " + id);
+        if (protectedCopy.contains(id)) throw new BackupDeletionRefusedException(
+                BackupDeletionRefusedException.Reason.RESTORE_PROTECTED, id);
         try (FileChannel channel = openLock(); FileLock ignored = acquireLock(channel)) {
             List<BackupRecord> good = listBackups();
             BackupRecord target = good.stream().filter(r -> r.id().equals(id)).findFirst().orElseThrow(() -> new IOException("Backup is missing or corrupt: " + id));
-            if (good.size() <= 1) throw new IOException("Cannot delete the last verified good backup");
+            if (good.size() <= 1 && !allowLastGood) throw new BackupDeletionRefusedException(
+                    BackupDeletionRefusedException.Reason.LAST_GOOD_CONFIRMATION_REQUIRED, id);
             removeRecord(target);
         }
     }

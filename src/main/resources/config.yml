@@ -1,4 +1,4 @@
-# VaultBackup Pro 1.0.0 | Minecraft 26.2 / 26.3 | Spigot・Paper・Purpur | Java 25
+# VaultBackup Pro 1.1.0 | Minecraft 26.2 / 26.3 | Spigot・Paper・Purpur | Java 25
 # 稼働中のファイルを保存するため、全ファイルが完全に同時点の状態とは限りません。
 # データベース等は各プラグイン側で書き込みを停止してください。
 # 厳密な同時点のコピーが必要な場合は、停止中に別の方法でバックアップしてください。

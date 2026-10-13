@@ -177,246 +177,168 @@
    END OF TERMS AND CONDITIONS
 
 
-==============================================================================
+================================================================================
 Licenses for included components:
 
-------------------------------------------------------------------------------
-Eclipse Public License 1.0
-https://opensource.org/licenses/EPL-1.0
-
-junit:junit
-org.sonatype.aether:aether-api
-org.sonatype.aether:aether-connector-wagon
-org.sonatype.aether:aether-impl
-org.sonatype.aether:aether-spi
-org.sonatype.aether:aether-util
-
-------------------------------------------------------------------------------
-3-Clause BSD
+--------------------------------------------------------------------------------
+3-Clause BSD License
 https://opensource.org/licenses/BSD-3-Clause
-
-com.google.code.findbugs:jsr305
-
-org.hamcrest:hamcrest
-BSD 3-Clause License
-
-Copyright (c) 2000-2024, www.hamcrest.org
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
-
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
-
-3. Neither the name of the copyright holder nor the names of its
-   contributors may be used to endorse or promote products derived from
-   this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 com.esotericsoftware.kryo:kryo
 com.esotericsoftware.minlog:minlog
-Copyright (c) 2008-2018, Nathan Sweet All rights reserved.
-
-Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
-
-Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
-Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
-Neither the name of Esoteric Software nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
+com.github.mwiede:jsch
+org.antlr:antlr4-runtime
+org.eclipse.jgit:org.eclipse.jgit
+org.eclipse.jgit:org.eclipse.jgit.ssh.apache
+org.eclipse.jgit:org.eclipse.jgit.ssh.apache.agent
 org.ow2.asm:asm
-org.ow2.asm:asm-analysis
 org.ow2.asm:asm-commons
 org.ow2.asm:asm-tree
-org.ow2.asm:asm-util
-ASM: a very small and fast Java bytecode manipulation framework
- Copyright (c) 2000-2011 INRIA, France Telecom
- All rights reserved.
 
- Redistribution and use in source and binary forms, with or without
- modification, are permitted provided that the following conditions
- are met:
- 1. Redistributions of source code must retain the above copyright
-    notice, this list of conditions and the following disclaimer.
- 2. Redistributions in binary form must reproduce the above copyright
-    notice, this list of conditions and the following disclaimer in the
-    documentation and/or other materials provided with the distribution.
- 3. Neither the name of the copyright holders nor the names of its
-    contributors may be used to endorse or promote products derived from
-    this software without specific prior written permission.
+--------------------------------------------------------------------------------
+Apache License, Version 2.0
+https://www.apache.org/licenses/LICENSE-2.0
 
- THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
- LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
- THE POSSIBILITY OF SUCH DAMAGE.
+com.amazonaws:aws-java-sdk-core
+com.amazonaws:aws-java-sdk-kms
+com.amazonaws:aws-java-sdk-s3
+com.amazonaws:aws-java-sdk-sts
+com.amazonaws:jmespath-java
+com.fasterxml.jackson.core:jackson-annotations
+com.fasterxml.jackson.core:jackson-core
+com.fasterxml.jackson.core:jackson-databind
+com.fasterxml.jackson.datatype:jackson-datatype-jdk8
+com.fasterxml.jackson.datatype:jackson-datatype-jsr310
+com.fasterxml.jackson:jackson-bom
+com.github.jnr:jnr-constants
+com.google.api-client:google-api-client
+com.google.apis:google-api-services-storage
+com.google.code.findbugs:jsr305
+com.google.code.gson:gson
+com.google.errorprone:error_prone_annotations
+com.google.guava:failureaccess
+com.google.guava:guava
+com.google.http-client:google-http-client
+com.google.http-client:google-http-client-apache-v2
+com.google.http-client:google-http-client-gson
+com.google.oauth-client:google-oauth-client
+com.googlecode.jatl:jatl
+com.thoughtworks.qdox:qdox
+commons-codec:commons-codec
+commons-io:commons-io
+io.grpc:grpc-context
+io.opencensus:opencensus-api
+io.opencensus:opencensus-contrib-http-util
+it.unimi.dsi:fastutil
+javax.inject:javax.inject
+joda-time:joda-time
+net.rubygrapefruit:native-platform
+net.rubygrapefruit:native-platform-freebsd-amd64-libcpp
+net.rubygrapefruit:native-platform-linux-aarch64
+net.rubygrapefruit:native-platform-linux-aarch64-ncurses5
+net.rubygrapefruit:native-platform-linux-aarch64-ncurses6
+net.rubygrapefruit:native-platform-linux-amd64
+net.rubygrapefruit:native-platform-linux-amd64-ncurses5
+net.rubygrapefruit:native-platform-linux-amd64-ncurses6
+net.rubygrapefruit:native-platform-osx-aarch64
+net.rubygrapefruit:native-platform-osx-amd64
+net.rubygrapefruit:native-platform-windows-aarch64
+net.rubygrapefruit:native-platform-windows-aarch64-min
+net.rubygrapefruit:native-platform-windows-amd64
+net.rubygrapefruit:native-platform-windows-amd64-min
+net.rubygrapefruit:native-platform-windows-i386
+net.rubygrapefruit:native-platform-windows-i386-min
+org.apache.ant:ant
+org.apache.ant:ant-antlr
+org.apache.ant:ant-launcher
+org.apache.commons:commons-compress
+org.apache.commons:commons-lang3
+org.apache.groovy:groovy
+org.apache.groovy:groovy-ant
+org.apache.groovy:groovy-astbuilder
+org.apache.groovy:groovy-bom
+org.apache.groovy:groovy-datetime
+org.apache.groovy:groovy-dateutil
+org.apache.groovy:groovy-docgenerator
+org.apache.groovy:groovy-groovydoc
+org.apache.groovy:groovy-json
+org.apache.groovy:groovy-nio
+org.apache.groovy:groovy-templates
+org.apache.groovy:groovy-xml
+org.apache.httpcomponents:httpclient
+org.apache.httpcomponents:httpcore
+org.apache.ivy:ivy
+org.apache.maven:maven-builder-support
+org.apache.maven:maven-model
+org.apache.maven:maven-repository-metadata
+org.apache.maven:maven-settings
+org.apache.maven:maven-settings-builder
+org.apache.sshd:sshd-osgi
+org.apache.sshd:sshd-sftp
+org.codehaus.plexus:plexus-cipher
+org.codehaus.plexus:plexus-interpolation
+org.codehaus.plexus:plexus-sec-dispatcher
+org.codehaus.plexus:plexus-utils
+org.fusesource.jansi:jansi
+org.gradle.buildtool.internal:configuration-cache-report
+org.gradle.buildtool.internal:configuration-cache-report-jvm
+org.gradle.fileevents:gradle-fileevents
+org.jctools:jctools-core
+org.jetbrains.kotlin:kotlin-assignment-compiler-plugin-embeddable
+org.jetbrains.kotlin:kotlin-build-tools-api
+org.jetbrains.kotlin:kotlin-build-tools-impl
+org.jetbrains.kotlin:kotlin-compiler-embeddable
+org.jetbrains.kotlin:kotlin-daemon-embeddable
+org.jetbrains.kotlin:kotlin-reflect
+org.jetbrains.kotlin:kotlin-sam-with-receiver-compiler-plugin
+org.jetbrains.kotlin:kotlin-script-runtime
+org.jetbrains.kotlin:kotlin-scripting-common
+org.jetbrains.kotlin:kotlin-scripting-compiler-embeddable
+org.jetbrains.kotlin:kotlin-scripting-compiler-impl-embeddable
+org.jetbrains.kotlin:kotlin-scripting-jvm
+org.jetbrains.kotlin:kotlin-scripting-jvm-host
+org.jetbrains.kotlin:kotlin-stdlib
+org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm
+org.jetbrains.kotlinx:kotlinx-serialization-bom
+org.jetbrains.kotlinx:kotlinx-serialization-core
+org.jetbrains.kotlinx:kotlinx-serialization-core-jvm
+org.jetbrains.kotlinx:kotlinx-serialization-json
+org.jetbrains.kotlinx:kotlinx-serialization-json-jvm
+org.jetbrains:annotations
+org.jspecify:jspecify
+org.objenesis:objenesis
+org.slf4j:jcl-over-slf4j
+org.slf4j:log4j-over-slf4j
+org.tomlj:tomlj
+org.yaml:snakeyaml
 
-------------------------------------------------------------------------------
-MIT
+--------------------------------------------------------------------------------
+Bouncy Castle Licence
+https://www.bouncycastle.org/licence.html
+
+org.bouncycastle:bcpg-jdk18on
+org.bouncycastle:bcprov-jdk18on
+org.bouncycastle:bcutil-jdk18on
+
+--------------------------------------------------------------------------------
+Eclipse Public License 2.0
+https://www.eclipse.org/legal/epl-v20.html
+
+org.junit:junit-bom
+
+--------------------------------------------------------------------------------
+LGPL 2.1
+https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+
+com.github.javaparser:javaparser-core
+jcifs:jcifs
+net.java.dev.jna:jna
+net.java.dev.jna:jna-platform
+
+--------------------------------------------------------------------------------
+MIT License
+https://opensource.org/licenses/MIT
 
 com.googlecode.plist:dd-plist
-dd-plist - An open source library to parse and generate property lists
-Copyright (C) 2016 Daniel Dreibrodt
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-org.bouncycastle:bcpg-jdk15on
-org.bouncycastle:bcprov-jdk15on
-Copyright (c) 2000 - 2019 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-org.slf4j:jcl-over-slf4j
 org.slf4j:jul-to-slf4j
-org.slf4j:log4j-over-slf4j
 org.slf4j:slf4j-api
-Copyright (c) 2004-2022 QOS.ch Sarl (Switzerland)
-All rights reserved.
-
-Permission is hereby granted, free  of charge, to any person obtaining
-a  copy  of this  software  and  associated  documentation files  (the
-"Software"), to  deal in  the Software without  restriction, including
-without limitation  the rights to  use, copy, modify,  merge, publish,
-distribute,  sublicense, and/or sell  copies of  the Software,  and to
-permit persons to whom the Software  is furnished to do so, subject to
-the following conditions:
-
-The  above  copyright  notice  and  this permission  notice  shall  be
-included in all copies or substantial portions of the Software.
-
-THE  SOFTWARE IS  PROVIDED  "AS  IS", WITHOUT  WARRANTY  OF ANY  KIND,
-EXPRESS OR  IMPLIED, INCLUDING  BUT NOT LIMITED  TO THE  WARRANTIES OF
-MERCHANTABILITY,    FITNESS    FOR    A   PARTICULAR    PURPOSE    AND
-NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
-LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE,  ARISING FROM, OUT OF OR IN CONNECTION
-WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-
-------------------------------------------------------------------------------
-CDDL
-https://opensource.org/licenses/CDDL-1.0
-
-com.sun.xml.bind:jaxb-impl
-
-------------------------------------------------------------------------------
-LGPL 2.1
-https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html
-
-org.samba.jcifs:jcifs
-
-org.jetbrains.intellij.deps:trove4j
-
-------------------------------------------------------------------------------
-License for the GNU Trove library included by the Kotlin embeddable compiler
-------------------------------------------------------------------------------
-The source code for GNU Trove is licensed under the Lesser GNU Public License (LGPL).
-
-    Copyright (c) 2001, Eric D. Friedman All Rights Reserved. This library is free software; you can redistribute it and/or modify it under
-    the terms of the GNU Lesser General Public License as published by the Free Software Foundation; either version 2.1 of the License, or
-    (at your option) any later version. This library is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
-    even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
-    You should have received a copy of the GNU Lesser General Public License along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
-
-
-Two classes (HashFunctions and PrimeFinder) included in Trove are licensed under the following terms:
-
-    Copyright (c) 1999 CERN - European Organization for Nuclear Research. Permission to use, copy, modify, distribute and sell this software
-    and its documentation for any purpose is hereby granted without fee, provided that the above copyright notice appear in all copies and
-    that both that copyright notice and this permission notice appear in supporting documentation. CERN makes no representations about the
-    suitability of this software for any purpose. It is provided "as is" without expressed or implied warranty.
-
-The source code of modified GNU Trove library is available at
-    https://github.com/JetBrains/intellij-deps-trove4j (with trove4j_changes.txt describing the changes)
-
-------------------------------------------------------------------------------
-Eclipse Distribution License 1.0
-https://www.eclipse.org/org/documents/edl-v10.php
-
-org.eclipse.jgit:org.eclipse.jgit
-
-------------------------------------------------------------------------------
-BSD-style
-
-com.jcraft:jzlib
-com.github.mwiede:jsch
-
-Copyright (c) 2002-2015 Atsuhiko Yamanaka, JCraft,Inc.
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-  1. Redistributions of source code must retain the above copyright notice,
-     this list of conditions and the following disclaimer.
-
-  2. Redistributions in binary form must reproduce the above copyright
-     notice, this list of conditions and the following disclaimer in
-     the documentation and/or other materials provided with the distribution.
-
-  3. The names of the authors may not be used to endorse or promote products
-     derived from this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESSED OR IMPLIED WARRANTIES,
-INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
-FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL JCRAFT,
-INC. OR ANY CONTRIBUTORS TO THIS SOFTWARE BE LIABLE FOR ANY DIRECT, INDIRECT,
-INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA,
-OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
-EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-------------------------------------------------------------------------------
-Eclipse Public License 2.0
-https://www.eclipse.org/legal/epl-2.0/
-
-org.junit.platform:junit-platform-launcher
-
-------------------------------------------------------------------------------
-Mozilla Public License 2.0
-https://www.mozilla.org/en-US/MPL/2.0/
-
-org.mozilla:rhino

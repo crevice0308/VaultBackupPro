@@ -4,7 +4,7 @@ rem Usage: restore.cmd C:\absolute\state\restore-jobs\JOB\job.properties [--reco
 if "%~1"=="" goto usage
 if not "%~3"=="" goto usage
 set "HELPER=%VAULTBACKUP_HELPER_JAR%"
-if not defined HELPER set "HELPER=%~dp0vaultbackup-restore-1.0.0.jar"
+if not defined HELPER set "HELPER=%~dp0vaultbackup-restore-1.1.0.jar"
 set "JAVA=java"
 if defined JAVA_HOME set "JAVA=%JAVA_HOME%\bin\java.exe"
 echo Japanese instructions: see docs\OFFLINE-RESTORE.md (UTF-8).

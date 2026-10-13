@@ -28,6 +28,7 @@ public final class BackupEngineTest {
             symlinksAndUnsafePaths();
             corruptionAndIncompleteArchives();
             retentionAndLastGood();
+            explicitManualDeletionConsent();
             maliciousArchivesAndLimits();
             storeLockIsFailFast();
             System.out.println("PASS BackupEngineTest (" + checks + " checks)");
@@ -166,6 +167,51 @@ public final class BackupEngineTest {
         expectIOException(() -> engine.delete(engine.listBackups().getFirst().id(), Set.of()), "last good survives explicit delete");
     }
 
+    private static void explicitManualDeletionConsent() throws Exception {
+        BackupEngine engine = engine("manual-consent");
+        Files.writeString(engine.serverRoot().resolve("x"), "first");
+        BackupRecord first = engine.createBackup("first");
+        byte[] archive = Files.readAllBytes(first.zipPath());
+        byte[] metadata = Files.readAllBytes(first.metadataPath());
+        expectRefusal(() -> engine.delete(first.id(), Set.of()),
+                BackupDeletionRefusedException.Reason.LAST_GOOD_CONFIRMATION_REQUIRED, first.id());
+        check(Arrays.equals(archive, Files.readAllBytes(first.zipPath()))
+                && Arrays.equals(metadata, Files.readAllBytes(first.metadataPath())), "unwarned last backup stays byte-identical");
+        BackupRecord second = engine.createBackup("second");
+        engine.delete(first.id(), Set.of(), false);
+        check(!Files.exists(first.zipPath()) && !Files.exists(first.metadataPath()), "ordinary consent deletes with a second valid backup");
+        equal(engine.listBackups().stream().map(BackupRecord::id).toList(), List.of(second.id()), "ordinary delete preserves other backup");
+        // A stale two-backup confirmation must not silently acquire permission for zero.
+        expectRefusal(() -> engine.delete(second.id(), Set.of(), false),
+                BackupDeletionRefusedException.Reason.LAST_GOOD_CONFIRMATION_REQUIRED, second.id());
+        expectRefusal(() -> engine.delete(second.id(), Set.of(second.id()), true),
+                BackupDeletionRefusedException.Reason.RESTORE_PROTECTED, second.id());
+        equal(engine.verify(second.id()).id(), second.id(), "even explicit last consent cannot delete a restore reservation");
+        engine.retain(1, 1, Set.of(), () -> false, ignored -> {});
+        equal(engine.listBackups().size(), 1, "automatic retention still keeps last good backup");
+        engine.delete(second.id(), Set.of(), true);
+        equal(engine.listBackups().size(), 0, "warned confirmed manual deletion may leave zero");
+        check(!Files.exists(second.zipPath()) && !Files.exists(second.metadataPath()), "confirmed last deletion removes archive and sidecar");
+        try { engine.delete(second.id(), Set.of(), true); throw new AssertionError("missing deletion accepted"); }
+        catch (IOException expected) { check(!(expected instanceof BackupDeletionRefusedException), "missing backup remains unexpected IO diagnostic"); }
+        BackupRecord recreated = engine.createBackup("after-zero");
+        equal(engine.verify(recreated.id()).id(), recreated.id(), "backup creation works after deleting final generation");
+
+        BackupEngine corruptEngine = engine("manual-corrupt-sibling");
+        Files.writeString(corruptEngine.serverRoot().resolve("x"), "data");
+        BackupRecord good = corruptEngine.createBackup("good");
+        BackupRecord corrupt = corruptEngine.createBackup("will-corrupt");
+        Files.write(corrupt.zipPath(), new byte[]{1,2,3});
+        expectRefusal(() -> corruptEngine.delete(good.id(), Set.of(), false),
+                BackupDeletionRefusedException.Reason.LAST_GOOD_CONFIRMATION_REQUIRED, good.id());
+        equal(corruptEngine.verify(good.id()).id(), good.id(), "corrupt second backup is insufficient to bypass warning");
+        try { corruptEngine.delete(corrupt.id(), Set.of(), true); throw new AssertionError("corrupt deletion accepted"); }
+        catch (IOException expected) { check(!(expected instanceof BackupDeletionRefusedException), "corrupt target remains unexpected IO diagnostic"); }
+        corruptEngine.delete(good.id(), Set.of(), true);
+        equal(corruptEngine.listBackups().size(), 0, "explicit last consent handles corrupt sibling without counting it");
+        check(Files.exists(corrupt.zipPath()) && Files.exists(corrupt.metadataPath()), "manual delete does not remove other corrupt files");
+    }
+
     private static void maliciousArchivesAndLimits() throws Exception {
         BackupEngine engine = engine("malicious");
         String id = "20260101T000000000Z-0123456789ab";
@@ -261,6 +307,13 @@ public final class BackupEngineTest {
     private static void check(boolean condition, String message) { checks++; if (!condition) throw new AssertionError(message); }
     private static void equal(Object actual, Object expected, String message) { check(Objects.equals(actual, expected), message + ": expected " + expected + ", got " + actual); }
     @FunctionalInterface private interface ThrowingRunnable { void run() throws Exception; }
+    private static void expectRefusal(ThrowingRunnable action, BackupDeletionRefusedException.Reason reason, String id) throws Exception {
+        try { action.run(); throw new AssertionError("Expected typed deletion refusal: " + reason); }
+        catch (BackupDeletionRefusedException expected) {
+            equal(expected.reason(), reason, "typed deletion reason");
+            equal(expected.backupId(), id, "typed deletion target");
+        }
+    }
     private static void expectIOException(ThrowingRunnable action, String message) throws Exception {
         checks++;
         try { action.run(); } catch (IOException expected) { return; }

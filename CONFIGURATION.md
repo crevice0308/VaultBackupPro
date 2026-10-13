@@ -1,4 +1,4 @@
-# VaultBackup Pro 1.0.0 設定
+# VaultBackup Pro 1.1.0 設定
 
 設定ファイルは `plugins/VaultBackupPro/config.yml` です。同梱設定を既定値の基準とします。`/backup reload` は候補設定を検証してから反映し、不正な場合は現在の設定を保持します。GUI・コマンドによる設定変更は検証後にファイルを原子的に置き換え、再起動後も残ります。
 

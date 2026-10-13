@@ -1,0 +1,47 @@
+name: One-time v1.1.0 release
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-v1.1.0.yml']
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: github.repository == 'crevice0308/VaultBackupPro' && github.event.head_commit.message == 'Release audited VaultBackup Pro 1.1.0 (one-time 20261013)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install checksum-pinned official Java 25
+        run: bash .github/scripts/setup-java25.sh
+      - name: Rebuild, verify, test and package exact reviewed bytes
+        run: |
+          bash gradlew --no-daemon clean release check
+          sha256sum --check release/SHA256SUMS.txt
+          python3 tools/package_release.py dist
+      - name: Create only v1.1.0, verify draft assets, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: crevice0308/VaultBackupPro
+        run: |
+          set -euo pipefail
+          if gh release view v1.1.0 >/dev/null 2>&1; then
+            echo 'Refusing to alter an existing v1.1.0 release.' >&2
+            exit 1
+          fi
+          gh release create v1.1.0 \
+            dist/VaultBackupPro-1.1.0.jar \
+            dist/VaultBackupPro-1.1.0-plugin.zip \
+            dist/VaultBackupPro-1.1.0-source.zip \
+            dist/SHA256SUMS.txt \
+            --target "$GITHUB_SHA" --title 'VaultBackup Pro 1.1.0' \
+            --notes-file release/NOTES.md --draft
+          mkdir downloaded-release
+          gh release download v1.1.0 --dir downloaded-release
+          cmp dist/SHA256SUMS.txt downloaded-release/SHA256SUMS.txt
+          (cd downloaded-release && sha256sum --check SHA256SUMS.txt)
+          gh release edit v1.1.0 --draft=false

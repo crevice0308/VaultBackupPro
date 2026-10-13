@@ -72,7 +72,7 @@ public final class RestoreMain {
                     try(RestoreJobState.Gate gate=RestoreJobState.lock(job.dir,Duration.ofSeconds(2))) {
                         if(gate!=null && !RestoreJobState.hasCancellation(job.dir) && RestoreJobState.waiting(RestoreFiles.status(job.dir)))
                             RestoreFiles.status(job.dir,"FAILED_BEFORE_SWAP",e.getMessage());
-                    }catch(IOException journalError){e.addSuppressed(journalError);}
+                    }catch(Exception journalError){e.addSuppressed(journalError);}
                     throw e;
                 }
             }
@@ -200,18 +200,20 @@ public final class RestoreMain {
             originalMoved=originalMoved || (moveAttempted && Files.exists(job.rollback,RestoreFiles.NOFOLLOW));
             installed=installed || (originalMoved && Files.exists(job.root,RestoreFiles.NOFOLLOW));
             if(originalMoved) {
+                // A journal failure may be the install error itself. Reporting rollback must
+                // never prevent the atomic moves that put the preserved original back.
+                try{RestoreFiles.status(job.dir,"ROLLING_BACK","Install failed; restoring untouched original root");}catch(Exception statusError){error.addSuppressed(statusError);}
                 try {
-                    RestoreFiles.status(job.dir,"ROLLING_BACK","Install failed; restoring untouched original root");
                     if(installed)RestoreFiles.move(job.root,job.failed);
                     RestoreFiles.move(job.rollback,job.root);
                     Files.deleteIfExists(job.dir.resolve("receipt.properties"));
-                    RestoreFiles.status(job.dir,"FAILED_ROLLED_BACK","Original root restored; failed/staged data retained. "+error.getMessage());
+                    try{RestoreFiles.status(job.dir,"FAILED_ROLLED_BACK","Original root restored; failed/staged data retained. "+error.getMessage());}catch(Exception statusError){error.addSuppressed(statusError);}
                 } catch(Exception rollbackError) {
                     error.addSuppressed(rollbackError);
-                    try{RestoreFiles.status(job.dir,"RECOVERY_REQUIRED","Automatic rollback was incomplete. Do not start server. Preserve every sibling and use --recover while stopped. "+error.getMessage());}catch(IOException statusError){error.addSuppressed(statusError);}
+                    try{RestoreFiles.status(job.dir,"RECOVERY_REQUIRED","Automatic rollback was incomplete. Do not start server. Preserve every sibling and use --recover while stopped. "+error.getMessage());}catch(Exception statusError){error.addSuppressed(statusError);}
                 }
             } else {
-                try{RestoreFiles.status(job.dir,Files.exists(job.rollback,RestoreFiles.NOFOLLOW) ? "RECOVERY_REQUIRED" : "FAILED_BEFORE_SWAP","Original server-root was not moved by this attempt. Stage retained. "+error.getMessage());}catch(IOException statusError){error.addSuppressed(statusError);}
+                try{RestoreFiles.status(job.dir,Files.exists(job.rollback,RestoreFiles.NOFOLLOW) ? "RECOVERY_REQUIRED" : "FAILED_BEFORE_SWAP","Original server-root was not moved by this attempt. Stage retained. "+error.getMessage());}catch(Exception statusError){error.addSuppressed(statusError);}
             }
             if(error instanceof IOException io)throw io;throw new IOException("Restore failed",error);
         }

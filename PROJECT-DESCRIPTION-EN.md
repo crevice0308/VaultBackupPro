@@ -1,4 +1,4 @@
-# VaultBackup Pro 1.0.0 — Free, GPLv3 server backups
+# VaultBackup Pro 1.1.0 — Free, GPLv3 server backups
 
 VaultBackup Pro is provided without charge with its complete project source under GNU GPL version 3. This release provides Japanese/English interface support and a manually controlled restore reservation workflow.
 
