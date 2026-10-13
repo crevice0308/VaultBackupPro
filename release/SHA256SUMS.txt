@@ -1,0 +1,2 @@
+1abf09736a5ea4bf1b363259a744c9ff050b7d73548db353e7066f357855c7ab  build/libs/VaultBackupPro-1.0.0.jar
+93ff6574b7af2b8bf3f72a48b4e1a0f1ab9628bbcd78a01e194f1eb416a520a9  build/libs/vaultbackup-restore-1.0.0.jar

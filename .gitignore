@@ -1,0 +1,10 @@
+.gradle/
+build/
+*.log
+input/
+dist/
+__pycache__/
+*.pyc
+*.zip
+docs/test-evidence/**
+!docs/test-evidence/artifact-inspection.json

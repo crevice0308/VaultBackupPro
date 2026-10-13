@@ -1,0 +1,33 @@
+{
+  "language_key": "language",
+  "ja_JP": {
+    "help": "VaultBackup Pro 1\\.0\\.0 コマンド一覧",
+    "status": "バックアップ [0-9]+ 件 / 空き",
+    "idle": "待機中",
+    "list": "検証済みバックアップ",
+    "created": "バックアップを作成しました:",
+    "preview": "復元対象を検証しました:",
+    "armed": "復元を予約しました:.*サーバーは稼働中です",
+    "armed_status": "復元予約済み・手動停止待ち",
+    "cancel": "復元予約を取り消しました。サーバーは稼働を続けます",
+    "receipt": "復元成功を検証しました",
+    "delete_protected": "このバックアップは復元用に保護されています",
+    "backup_blocked": "復元確認・予約を取り消してからバックアップを作成してください"
+  },
+  "en_US": {
+    "help": "VaultBackup Pro 1\\.0\\.0 commands:",
+    "status": "[0-9]+ backups / free",
+    "idle": "Idle",
+    "list": "Verified backups, page|No valid backups yet",
+    "invalid_interval": "Interval must be 1–525600 minutes",
+    "preview": "Restore verified:",
+    "armed": "Restore reserved:.*The server remains running",
+    "armed_status": "[Rr]eserved; awaiting manual stop",
+    "cancel": "Restore reservation cancelled. The server remains running",
+    "delete_protected": "This backup is protected for restore",
+    "backup_blocked": "Cancel the pending or committed restore before creating a backup",
+    "created": "Backup created:",
+    "no_confirmation": "No unexpired restore confirmation",
+    "updated": "Setting updated:"
+  }
+}

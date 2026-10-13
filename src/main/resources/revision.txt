@@ -1,0 +1,5 @@
+VaultBackup Pro
+Version: 1.0.0
+Revision: ManualStop-JA
+License: GPL-3.0-only
+Default artifacts: non-obfuscated

@@ -1,0 +1,45 @@
+name: VaultBackupPro
+version: '1.0.0'
+main: com.vaultbackup.plugin.VaultBackupPlugin
+api-version: '26.2'
+author: VaultBackup
+description: 非同期バックアップと手動停止後の安全なオフライン復元
+load: STARTUP
+commands:
+  backup:
+    description: VaultBackup Pro の管理
+    usage: /backup help
+    aliases: [vaultbackup]
+permissions:
+  vaultbackup.admin:
+    description: VaultBackup 管理者権限
+    default: op
+    children:
+      vaultbackup.gui: true
+      vaultbackup.create: true
+      vaultbackup.list: true
+      vaultbackup.restore: true
+      vaultbackup.delete: true
+      vaultbackup.status: true
+      vaultbackup.configure: true
+      vaultbackup.reload: true
+      vaultbackup.notify: true
+  vaultbackup.gui:
+    description: 管理画面を開く権限（vaultbackup.admin も必要）
+    default: op
+  vaultbackup.create:
+    default: op
+  vaultbackup.list:
+    default: op
+  vaultbackup.restore:
+    default: op
+  vaultbackup.delete:
+    default: op
+  vaultbackup.status:
+    default: op
+  vaultbackup.configure:
+    default: op
+  vaultbackup.reload:
+    default: op
+  vaultbackup.notify:
+    default: op

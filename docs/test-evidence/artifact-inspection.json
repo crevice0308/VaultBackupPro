@@ -1,0 +1,13 @@
+{
+  "plugin": {
+    "sha256": "1abf09736a5ea4bf1b363259a744c9ff050b7d73548db353e7066f357855c7ab",
+    "bytes": 274018,
+    "class_count": 37
+  },
+  "helper": {
+    "sha256": "93ff6574b7af2b8bf3f72a48b4e1a0f1ab9628bbcd78a01e194f1eb416a520a9",
+    "bytes": 105276,
+    "class_count": 25
+  },
+  "embedded_helper_matches": true
+}

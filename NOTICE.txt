@@ -1,0 +1,13 @@
+VaultBackup Pro 1.0.0 — ManualStop-JA revision
+
+Project source and original helper code in this distribution are licensed under the GNU General Public License, version 3 only (SPDX: GPL-3.0-only), as approved by the commissioning user on 2026-10-13. See LICENSE.txt for the full terms. Third-party files retain their own notices and licenses; see THIRD-PARTY-NOTICES.md.
+
+This program is free software: you may redistribute it and/or modify it under the terms of GNU GPL version 3. This program is distributed without any warranty, including the implied warranties of merchantability or fitness for a particular purpose. Keep independent backups and verify restoration before relying on it.
+
+The project is provided without charge. GPLv3 also permits commercial use and charging for redistribution under its terms; this project adds no noncommercial or no-resale restriction.
+
+Corresponding source, build configuration, test harnesses and documentation are supplied in the accompanying VaultBackupPro-1.0.0-ManualStop-JA-source.zip. When redistributing a binary, comply with GPLv3's corresponding-source requirements and preserve this license and the applicable notices. Do not describe a binary-only mirror as the complete source distribution.
+
+No public source repository has been created by this build. No Minecraft/Paper/Purpur/Spigot server binary is included. Obtain server software from its official project.
+
+Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.

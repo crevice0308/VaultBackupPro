@@ -1,0 +1,53 @@
+plugins { id 'java' }
+if (Runtime.version().feature() < 25) throw new GradleException('Run Gradle with JDK 25 or newer (set JAVA_HOME).')
+group = 'com.vaultbackup'
+version = '1.0.0'
+repositories { mavenCentral(); maven { url = 'https://hub.spigotmc.org/nexus/content/repositories/snapshots/' } }
+// Official timestamped API snapshot, pinned rather than a moving SNAPSHOT.
+dependencies { compileOnly 'org.spigotmc:spigot-api:26.2-R0.1-20260915.151451-13' }
+java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8'; options.release = 25 }
+tasks.withType(AbstractArchiveTask).configureEach { preserveFileTimestamps = false; reproducibleFileOrder = true }
+jar { archiveBaseName = 'VaultBackupPro'; archiveClassifier = '' }
+tasks.register('restoreJar', Jar) {
+ dependsOn compileJava
+ archiveBaseName = 'vaultbackup-restore'; archiveClassifier = ''
+ from(sourceSets.main.output.classesDirs) { include 'com/vaultbackup/core/**', 'com/vaultbackup/restore/**' }
+ from(projectDir) { include 'LICENSE.txt', 'NOTICE.txt', 'THIRD-PARTY-NOTICES.md'; into 'META-INF' }
+ manifest { attributes 'Main-Class': 'com.vaultbackup.restore.RestoreMain' }
+}
+processResources {
+ dependsOn restoreJar
+ from(projectDir) { include 'LICENSE.txt', 'NOTICE.txt', 'THIRD-PARTY-NOTICES.md'; into 'META-INF' }
+ from(tasks.named('restoreJar')) { rename { 'vaultbackup-restore.jar' } }
+}
+tasks.register('release') { dependsOn jar, restoreJar }
+tasks.register('resolveCompileClasspath') { doLast { configurations.compileClasspath.files.each { println it } } }
+configurations.testCompileClasspath.extendsFrom(configurations.compileOnly)
+configurations.testRuntimeClasspath.extendsFrom(configurations.compileOnly)
+tasks.register('coreTest', JavaExec) {
+ dependsOn testClasses
+ classpath = sourceSets.test.runtimeClasspath
+ mainClass = 'com.vaultbackup.core.BackupEngineTest'
+}
+tasks.register('restoreTest', JavaExec) {
+ dependsOn testClasses, restoreJar
+ classpath = sourceSets.test.runtimeClasspath
+ mainClass = 'com.vaultbackup.restore.RestoreSafetyTest'
+ args layout.buildDirectory.file('libs/vaultbackup-restore-1.0.0.jar').get().asFile.absolutePath
+}
+tasks.register('settingsTest', JavaExec) {
+ dependsOn testClasses
+ classpath = sourceSets.test.runtimeClasspath
+ mainClass = 'com.vaultbackup.plugin.PluginSettingsTest'
+ args file('src/main/resources/config.yml').absolutePath
+}
+check.dependsOn coreTest, restoreTest, settingsTest
+// These are explicit standalone assertion harnesses rather than JUnit tests.
+tasks.named('test') { enabled = false }
+tasks.register('lifecycleTest', JavaExec) {
+ dependsOn testClasses
+ classpath = sourceSets.test.runtimeClasspath
+ mainClass = 'com.vaultbackup.plugin.ServerLifecycleProbe'
+}
+check.dependsOn lifecycleTest

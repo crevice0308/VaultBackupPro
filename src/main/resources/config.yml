@@ -1,0 +1,64 @@
+# VaultBackup Pro 1.0.0 | Minecraft 26.2 / 26.3 | Spigot・Paper・Purpur | Java 25
+# 稼働中のファイルを保存するため、全ファイルが完全に同時点の状態とは限りません。
+# データベース等は各プラグイン側で書き込みを停止してください。
+# 厳密な同時点のコピーが必要な場合は、停止中に別の方法でバックアップしてください。
+
+# 表示言語: ja_JP（日本語、既定）または en_US（English）。
+# 旧 config.yml にこの項目がなくても日本語になります。
+# /backup reload で反映。復元の確認・予約中は設定変更できません。
+language: ja_JP
+
+# 保存先変更には再起動が必要です。
+# backup-directory と state-directory は server-root の外に、別々に配置してください。
+storage:
+  server-root: .
+  backup-directory: ../VaultBackup-backups
+  state-directory: ../VaultBackup-state
+
+backup:
+  compression-level: 6
+  include:
+    - '**'
+  exclude:
+    - 'logs/**'
+    - 'cache/**'
+    - '*.log'
+    - '**/*.lock'
+    - '**/session.lock'
+    - 'crash-reports/**'
+
+# 処理中または復元予約中の自動実行はスキップし、重複実行しません。
+automatic:
+  enabled: true
+  interval-minutes: 60
+
+# 0 でその保存制限を無効化します。復元用のアーカイブは保護されます。
+# 最新の有効なバックアップは、それだけで容量上限を超えても保持します。
+retention:
+  max-count: 20
+  max-bytes: 53687091200
+
+# アーカイブの読み込み・展開に適用する上限。
+# 最大値: 1,000,000 ファイル、1 ファイル 256 GiB、合計 1 TiB、圧縮比 10,000。
+limits:
+  max-entries: 100000
+  max-entry-bytes: 34359738368
+  max-total-bytes: 1099511627776
+  max-compression-ratio: 2000.0
+
+restore:
+  # 同梱ヘルパーを外部保存先へ設置します。稼働中に復元する代替処理はありません。
+  helper-jar: ../VaultBackup-state/helper/vaultbackup-restore.jar
+  # 最終確認をするまでの有効期間。確定済みの手動停止待ち予約には適用しません。
+  confirmation-seconds: 60
+  # 確定後もサーバーは稼働します。自動再起動を無効化し、手動で停止してください。
+  # 復元はサーバー停止処理への到達と JVM 完全終了の両方を確認してから実行します。
+  # 停止処理を伴う障害終了も対象となり得ます。自動再起動は行いません。
+  # 停止前の取り消し: /backup restore cancel（適用開始後は不可）
+
+notifications:
+  discord:
+    enabled: false
+    # 明示的に有効化すると処理結果とバックアップ ID を Webhook へ送信します。
+    # URL は認証情報です。config.yml のファイル権限を適切に制限してください。
+    webhook-url: ''
