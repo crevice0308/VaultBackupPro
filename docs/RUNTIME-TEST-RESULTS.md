@@ -1,5 +1,7 @@
 # VaultBackup Pro 1.2.0 runtime results
 
+> These real-server results belong to the 1.2.0 final JAR listed below. They were not re-run for 1.2.1; see TEST-RESULTS.md for the 1.2.1 build and isolated test results.
+
 Prerelease test distribution. Tested on 2026-10-13 UTC with Temurin JDK 25.0.4.1+1.
 
 - Final plugin SHA-256: `598d17446beb71b56b58386edeaf3f51d9d943a71b0ac76c72dcc54d77550996`

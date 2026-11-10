@@ -2,6 +2,10 @@
 
 Java 25 is the release baseline.
 
+## 1.2.1 verification scope
+
+1.2.1 compiles against the same pinned Spigot 26.2 API and passes the isolated build/test suite in TEST-RESULTS.md. Spigot runtime tests were not run for 1.2.1.
+
 ## 1.2.0 verification scope
 
 The 1.2.0 build compiles against the pinned Spigot 26.2 API below. Fresh Spigot 26.2/26.3 runtime preparation did not complete in this environment: official BuildTools bootstrap encountered network failures and its subsequent retry was cancelled. No 1.2.0 Spigot server lifecycle run is claimed. The locally built server provenance and earlier source checks below describe the previous 1.1.0 validation only. Paper/Purpur 1.2.0 runtime results are reported separately.
