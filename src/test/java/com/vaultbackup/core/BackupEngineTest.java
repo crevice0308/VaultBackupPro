@@ -6,12 +6,18 @@ import java.nio.charset.StandardCharsets;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.file.*;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 import java.util.zip.*;
 
 /** Disposable-fixture integration tests; no server, network, or external test framework. */
@@ -34,6 +40,8 @@ public final class BackupEngineTest {
             concurrentStoreMutationIsRefused();
             maliciousArchivesAndLimits();
             storeLockIsFailFast();
+            privateFilesAndAbandonedPartCleanup();
+            verificationIsNotRepeatedForUnchangedArchives();
             System.out.println("PASS BackupEngineTest (" + checks + " checks)");
         } finally {
             try (var paths = Files.walk(fixture)) {
@@ -351,6 +359,94 @@ public final class BackupEngineTest {
             expectIOException(() -> engine.retain(1, 1, Set.of(), () -> false, progress -> {}), "busy store refuses retention");
         }
         equal(engine.listBackups().size(), 1, "busy store preserves existing archive and publishes nothing");
+    }
+
+    private static void privateFilesAndAbandonedPartCleanup() throws Exception {
+        Path base = Files.createDirectory(fixture.resolve("hardening"));
+        Path root = Files.createDirectory(base.resolve("server"));
+        Files.writeString(root.resolve("server.properties"), "rcon.password=fixture-secret\n");
+        // An administrator-created, ordinary shared directory: archives must not inherit its readability.
+        Path backups = Files.createDirectory(base.resolve("backups"));
+        boolean posix = Files.getFileStore(backups).supportsFileAttributeView(PosixFileAttributeView.class);
+        if (posix) Files.setPosixFilePermissions(backups, PosixFilePermissions.fromString("rwxr-xr-x"));
+        BackupEngine engine = new BackupEngine(BackupOptions.defaults(root, backups, base.resolve("state")));
+        String abandonedId = "20260101T000000000Z-0123456789ab";
+        Path abandonedZip = Files.write(backups.resolve("." + abandonedId + ".zip.part"), new byte[65536]);
+        Path abandonedMetadata = Files.writeString(backups.resolve("." + abandonedId + ".properties.part"), "partial");
+        Path foreign = Files.writeString(backups.resolve(".operator-notes.part"), "not created by VaultBackup");
+        Path outside = Files.writeString(base.resolve("outside-target"), "must survive");
+        Path linkedPart = backups.resolve(".20260101T000000001Z-0123456789ab.zip.part");
+        boolean links = true;
+        try { Files.createSymbolicLink(linkedPart, outside); } catch (UnsupportedOperationException | IOException unavailable) { links = false; }
+        BackupRecord record = engine.createBackup("hardened");
+        check(!Files.exists(abandonedZip, LinkOption.NOFOLLOW_LINKS) && !Files.exists(abandonedMetadata, LinkOption.NOFOLLOW_LINKS),
+                "abandoned temporary archive files are removed under the store lock");
+        check(Files.exists(foreign), "part files with other names are never removed");
+        if (links) {
+            check(Files.isSymbolicLink(linkedPart) && Files.readString(outside).equals("must survive"), "part-named symlinks are neither followed nor removed");
+            Files.delete(linkedPart);
+        }
+        equal(engine.listBackups().stream().map(BackupRecord::id).toList(), List.of(record.id()), "cleanup leaves the new archive valid");
+        if (posix) {
+            Set<PosixFilePermission> ownerOnly = PosixFilePermissions.fromString("rw-------");
+            equal(Files.getPosixFilePermissions(record.zipPath()), ownerOnly, "archive is owner-only even in a shared directory");
+            equal(Files.getPosixFilePermissions(record.metadataPath()), ownerOnly, "sidecar is owner-only even in a shared directory");
+        }
+    }
+
+    private static void verificationIsNotRepeatedForUnchangedArchives() throws Exception {
+        BackupEngine engine = engine("verification-cache");
+        Files.writeString(engine.serverRoot().resolve("a.dat"), "first file");
+        Files.writeString(engine.serverRoot().resolve("b.dat"), "second file");
+        BackupRecord first = engine.createBackup("first");
+        BackupRecord second = engine.createBackup("second");
+        AtomicInteger reads = new AtomicInteger();
+        Consumer<String> counter = message -> { if (message.startsWith("Verifying ")) reads.incrementAndGet(); };
+        // Each archive has exactly two manifest entries, so a full read reports two "Verifying" steps.
+        equal(engine.listBackups(() -> false, counter).size(), 2, "first listing returns both archives");
+        equal(reads.getAndSet(0), 4, "archives not yet verified by this engine are read in full");
+        equal(engine.listBackups(() -> false, counter).size(), 2, "routine listing keeps unchanged archives");
+        equal(reads.getAndSet(0), 0, "routine listing does not re-read unchanged archives");
+        equal(engine.retain(10, Long.MAX_VALUE, Set.of(), () -> false, counter).size(), 0, "retention within limits removes nothing");
+        equal(reads.getAndSet(0), 0, "post-backup retention does not re-read unchanged archives");
+        equal(engine.revalidateBackups(() -> false, counter).size(), 2, "explicit revalidation returns both archives");
+        equal(reads.getAndSet(0), 4, "explicit revalidation re-reads every archive");
+        engine.verify(first.id(), () -> false, counter);
+        equal(reads.getAndSet(0), 2, "explicit verify always re-reads its archive");
+
+        byte[] original = Files.readAllBytes(first.zipPath());
+        FileTime originalTime = Files.getLastModifiedTime(first.zipPath());
+        byte[] corrupt = original.clone(); corrupt[corrupt.length / 2] ^= 1;
+        Files.write(first.zipPath(), corrupt);
+        Files.setLastModifiedTime(first.zipPath(), FileTime.fromMillis(originalTime.toMillis() + 5_000));
+        equal(engine.listBackups().stream().map(BackupRecord::id).toList(), List.of(second.id()), "modified archive is re-verified and dropped");
+        Files.write(first.zipPath(), original);
+        Files.setLastModifiedTime(first.zipPath(), originalTime);
+        equal(engine.listBackups().size(), 2, "restored archive verifies again");
+        // A different file with identical size and timestamps is still a different file.
+        Path swap = engine.backupDirectory().resolve("swap.tmp");
+        Files.write(swap, corrupt);
+        Files.setLastModifiedTime(swap, originalTime);
+        Files.move(swap, first.zipPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        if (Files.readAttributes(first.zipPath(), BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).fileKey() != null) {
+            equal(engine.listBackups().stream().map(BackupRecord::id).toList(), List.of(second.id()),
+                    "replacement with identical size and timestamps is re-verified and dropped");
+        }
+        // Corruption that keeps identity, size and timestamps is caught by explicit revalidation,
+        // and the failed result is not hidden by later routine listings.
+        Files.write(first.zipPath(), original);
+        Files.setLastModifiedTime(first.zipPath(), originalTime);
+        equal(engine.listBackups().size(), 2, "genuine bytes verify again");
+        try (FileChannel channel = FileChannel.open(first.zipPath(), StandardOpenOption.WRITE)) {
+            channel.write(java.nio.ByteBuffer.wrap(new byte[]{corrupt[corrupt.length / 2]}), corrupt.length / 2);
+        }
+        Files.setLastModifiedTime(first.zipPath(), originalTime);
+        equal(engine.revalidateBackups(() -> false, ignored -> {}).stream().map(BackupRecord::id).toList(), List.of(second.id()),
+                "explicit revalidation catches in-place corruption");
+        equal(engine.listBackups().stream().map(BackupRecord::id).toList(), List.of(second.id()), "failed revalidation is never served from cache");
+        expectIOException(() -> engine.verify(first.id()), "explicit verify rejects the corrupt archive");
+        engine.delete(second.id(), Set.of());
+        equal(engine.listBackups().size(), 0, "deleted archive is not served from cache");
     }
 
     private record Part(String name, byte[] data) { }

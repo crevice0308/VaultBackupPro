@@ -28,6 +28,7 @@ public final class RestoreSafetyTest {
             archiveTests(temp.resolve("archives"));
             preconditionTests(temp.resolve("conditions"));
             handshakeFailureTest(temp.resolve("handshake"));
+            helperIntegrityTest(temp.resolve("helper-integrity"));
             malformedHandshakeFailureTest(temp.resolve("malformed-handshake"));
             cancelThenStopTest(temp.resolve("cancel-stop"));
             cancellationGateTest(temp.resolve("cancel-gate"));
@@ -406,6 +407,32 @@ public final class RestoreSafetyTest {
         throw new AssertionError("Timed out awaiting "+label+"; "+fixture,lastFailure);
     }
     private static boolean statusEquals(Path dir,String expected)throws IOException{return RestoreFiles.status(dir).equals(expected);}
+    /** A helper swapped on disk after installation must never be executed with the server's privileges. */
+    private static void helperIntegrityTest(Path fixture)throws Exception {
+        Files.createDirectories(fixture);Path root=Files.createDirectory(fixture.resolve("server"));Files.writeString(root.resolve("original"),"untouched");
+        Path backups=Files.createDirectory(fixture.resolve("backups"));Path state=Files.createDirectory(fixture.resolve("state"));
+        Path archive=backups.resolve("snapshot.zip");zip(archive,Map.of("new","new"),List.of());
+        Path helper=Files.createDirectories(state.resolve("helper")).resolve("vaultbackup-restore.jar");Files.copy(helperJar,helper);
+        RestoreCoordinator coordinator=new RestoreCoordinator(root,backups,state,helper);
+        refuses(()->coordinator.requireHelperSha256("not-a-digest"),"malformed expected helper digest is rejected");
+        refuses(()->coordinator.requireHelperSha256(null),"missing expected helper digest is rejected");
+        coordinator.requireHelperSha256(RestoreFiles.sha(helper));
+        Path marker=fixture.resolve("tampered-helper-ran");
+        Files.writeString(helper,"#!/bin/sh\ntouch '"+marker+"'\n");
+        var refused=coordinator.confirm(coordinator.reserve("snapshot",archive,RestoreFiles.sha(archive),Duration.ofMinutes(2)).token());
+        Path refusedJob=refused.jobFile().getParent();
+        check(!refused.helperReady(),"swapped helper is never reported ready");
+        check(refused.message().contains("does not match") && refused.message().contains("durably cancelled"),"swapped helper refusal is explained and disarmed");
+        check(!Files.exists(refusedJob.resolve("helper-process.properties")) && !Files.exists(marker),"swapped helper is never started");
+        check(!Files.exists(state.resolve("active-restore.properties")) && coordinator.protectedBackupIds().isEmpty(),"refused launch leaves no active reservation or pin");
+        check("NOT_LAUNCHED".equals(RestoreFiles.load(refusedJob.resolve("cancel-ack.properties")).getProperty("source")),"refused helper is acknowledged as never launched");
+        check(Files.readString(root.resolve("original")).equals("untouched"),"refused helper leaves server data untouched");
+        Files.copy(helperJar,helper,StandardCopyOption.REPLACE_EXISTING);
+        var accepted=coordinator.confirm(coordinator.reserve("snapshot",archive,RestoreFiles.sha(archive),Duration.ofMinutes(2)).token());
+        check(accepted.helperReady(),"the genuine helper still launches with the integrity check enabled");
+        check(coordinator.cancelCommitted().cancelled(),"integrity-checked reservation stays cancellable");
+        check(Files.readString(root.resolve("original")).equals("untouched"),"cancelled integrity-checked reservation leaves server data untouched");
+    }
     private static void zip(Path destination,Map<String,String> files,List<String> dirs)throws IOException {
         StringBuilder manifest=new StringBuilder("VAULTBACKUP-MANIFEST\t1\n");
         try(ZipOutputStream zip=new ZipOutputStream(Files.newOutputStream(destination))) {

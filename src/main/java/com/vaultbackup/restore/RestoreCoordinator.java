@@ -32,6 +32,8 @@ public final class RestoreCoordinator {
     private final long parentPid;
     private final Instant parentStartedAt;
     private String committedBackupId, startupFailure, ownedJobId;
+    /** SHA-256 of the helper bundled with the running plugin; null means no expectation was supplied. */
+    private String expectedHelperSha256;
     private static final Set<String> SAFE_TERMINAL=Set.of("EXPIRED","FAILED_BEFORE_SWAP");
 
     /** Acquire the process-lifetime guard before inspecting any mutable startup journal. */
@@ -181,6 +183,14 @@ public final class RestoreCoordinator {
         Reservation value=new Reservation(RestoreFiles.randomSecret().substring(0,24),backupId,expectedSha256,verified.entries().size(),verified.totalBytes(),Instant.now().plus(ttl));
         synchronized(this){ensureNoCommitted();pending.clear();pending.put(value.token(),new Pending(value,file,verified.manifestSha256()));}return value;
     }
+    /**
+     * The helper runs with the server's OS account and replaces server-root, so it must be
+     * exactly the bundled helper. confirm() re-hashes the installed file immediately before launch.
+     */
+    public synchronized void requireHelperSha256(String sha256)throws IOException {
+        if(sha256==null || !sha256.matches("[0-9a-f]{64}"))throw new IOException("Invalid expected helper SHA-256");
+        expectedHelperSha256=sha256;
+    }
     public synchronized void setLanguage(String value)throws IOException {
         ensureNoCommitted();language=value!=null && value.toLowerCase(Locale.ROOT).startsWith("ja")?"ja":"en";
     }
@@ -217,6 +227,8 @@ public final class RestoreCoordinator {
         Process process=null;
         try {
             RestoreFiles.regular(helperJar);
+            if(expectedHelperSha256!=null && !RestoreFiles.constantEquals(RestoreFiles.sha(helperJar),expectedHelperSha256))
+                throw new IOException("Installed restore helper does not match the helper bundled with this plugin. It was not started. Restart the server so the plugin reinstalls it, then reserve again");
             String executable=System.getProperty("os.name","").toLowerCase(Locale.ROOT).contains("win")?"java.exe":"java";
             Path java=Path.of(System.getProperty("java.home"),"bin",executable);
             try(RestoreJobState.Gate gate=RestoreJobState.requireLock(dir)) {

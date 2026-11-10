@@ -1,5 +1,5 @@
 name: VaultBackupPro
-version: '1.2.0'
+version: '1.2.1'
 main: com.vaultbackup.plugin.VaultBackupPlugin
 api-version: '26.2'
 author: VaultBackup

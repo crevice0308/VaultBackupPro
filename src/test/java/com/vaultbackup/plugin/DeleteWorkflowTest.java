@@ -147,7 +147,7 @@ public final class DeleteWorkflowTest {
             Class<?> unsafeType=Class.forName("sun.misc.Unsafe");Field uf=unsafeType.getDeclaredField("theUnsafe");uf.setAccessible(true);
             VaultBackupPlugin plugin=(VaultBackupPlugin)unsafeType.getMethod("allocateInstance",Class.class).invoke(uf.get(null),VaultBackupPlugin.class);
             field(plugin,JavaPlugin.class,"server",server);field(plugin,JavaPlugin.class,"isEnabled",true);
-            field(plugin,JavaPlugin.class,"description",new org.bukkit.plugin.PluginDescriptionFile("VaultBackupFixture","1.2.0",VaultBackupPlugin.class.getName()));
+            field(plugin,JavaPlugin.class,"description",new org.bukkit.plugin.PluginDescriptionFile("VaultBackupFixture","1.2.1",VaultBackupPlugin.class.getName()));
             org.bukkit.plugin.PluginLogger logger=new org.bukkit.plugin.PluginLogger(plugin);logger.setUseParentHandlers(false);
             field(plugin,JavaPlugin.class,"logger",logger);
             field(plugin,VaultBackupPlugin.class,"settings",settings);field(plugin,VaultBackupPlugin.class,"engine",engine);
@@ -181,7 +181,7 @@ public final class DeleteWorkflowTest {
             check(io.queue.size()==1 && contains(messages,"last verified catalogue") && contains(messages,first.id()),"busy list uses cached catalogue");
             commands.onCommand(sender,null,"backup",new String[]{"status"});
             commands.onCommand(sender,null,"backup",new String[]{"help"});
-            check(contains(messages,"Deleting backup") && contains(messages,"VaultBackup Pro 1.2.0 commands"),"status and help stay readable while busy");
+            check(contains(messages,"Deleting backup") && contains(messages,"VaultBackup Pro 1.2.1 commands"),"status and help stay readable while busy");
             io.runOne();drainMain(main);
             check(!busy.get() && !Files.exists(first.zipPath()) && !Files.exists(first.metadataPath()),"direct delete removes exact archive and metadata");
             check(Files.exists(second.zipPath()) && plugin.backups().size()==1,"other target remains intact");
@@ -224,7 +224,7 @@ public final class DeleteWorkflowTest {
             commands.onCommand(sender,null,"backup",new String[]{"restore",recreated.id()});
             check(io.queue.isEmpty() && contains(messages,"reservation already exists"),"plugin refuses a second reserved restore");
             commands.onCommand(sender,null,"backup",new String[]{"status"});commands.onCommand(sender,null,"backup",new String[]{"help"});
-            check(contains(messages,"fixture-job") && contains(messages,"VaultBackup Pro 1.2.0 commands"),"reserved status and help remain accessible");
+            check(contains(messages,"fixture-job") && contains(messages,"VaultBackup Pro 1.2.1 commands"),"reserved status and help remain accessible");
             field(plugin,VaultBackupPlugin.class,"restoreStatus",null);
             check(commands.onTabComplete(sender,null,"backup",new String[]{"delete",recreated.id(),""}).isEmpty(),"no delete confirmation completion");
             check(commands.onTabComplete(sender,null,"backup",new String[]{"restore",recreated.id(),""}).isEmpty(),"no restore confirmation completion");
@@ -246,6 +246,11 @@ public final class DeleteWorkflowTest {
             sourceCheck(pluginSource.contains("engine.delete(id, restores.protectedBackupIds())"),"backend restore pin checked again at mutation");
             sourceCheck(!pluginSource.contains("pendingDeletes") && !pluginSource.contains("pendingRestores"),"no actor confirmation maps remain");
             sourceCheck(pluginSource.contains("if (busy() || restoreReserved())"),"automatic backups still defer during restore");
+            sourceCheck(pluginSource.contains("restores.requireHelperSha256(HexFormat.of().formatHex(bundled))"),"installed helper digest is pinned before any launch");
+            sourceCheck(pluginSource.indexOf("prepareStateDirectory();") >= 0 && pluginSource.indexOf("prepareStateDirectory();") < pluginSource.indexOf("restoreGuardStartupFailure = true;"),
+                    "state directory creation failure is a plugin error, not a server shutdown");
+            sourceCheck(pluginSource.contains("BackupRecord record = engine.verify(id, this::isCancelled"),"restore reserves the record it just verified");
+            sourceCheck(!menus.contains("{ player.closeInventory(); return; }"),"click handler never closes an inventory inside InventoryClickEvent");
             // Simulated Bukkit inventory events exercise actual handlers and queued callbacks.
             // This is not a Minecraft client rendering or real-server inventory test.
             BackupMenus menusObject=new BackupMenus(plugin);field(plugin,VaultBackupPlugin.class,"menus",menusObject);

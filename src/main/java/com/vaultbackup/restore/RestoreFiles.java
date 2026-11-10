@@ -50,10 +50,20 @@ final class RestoreFiles {
         try (InputStream in = Files.newInputStream(file)) { p.load(in); }
         return p;
     }
+    /** Journal files can hold the job's HMAC secret: owner-only from creation, not after writing. */
+    static FileChannel createPrivateFile(Path file) throws IOException {
+        Set<OpenOption> open = Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+        try {
+            return FileChannel.open(file, open, java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                    java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")));
+        } catch (UnsupportedOperationException nonPosix) {
+            return FileChannel.open(file, open);
+        }
+    }
     static void write(Path file, Properties p) throws IOException {
         Path temp = file.resolveSibling(file.getFileName() + ".tmp-" + UUID.randomUUID());
         try {
-            try (FileChannel channel = FileChannel.open(temp, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+            try (FileChannel channel = createPrivateFile(temp);
                  OutputStream out = java.nio.channels.Channels.newOutputStream(channel)) {
                 p.store(out, "VaultBackupPro offline restore state");
                 out.flush(); channel.force(true);

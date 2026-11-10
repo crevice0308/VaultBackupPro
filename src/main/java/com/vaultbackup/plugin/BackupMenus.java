@@ -127,7 +127,15 @@ final class BackupMenus implements Listener {
         if (!(event.getView().getTopInventory().getHolder() instanceof Menu m)) return;
         event.setCancelled(true); // Covers bottom inventory, shift, number-key, swap, drop and collect-to-cursor.
         if (!(event.getWhoClicked() instanceof Player player)) return;
-        if (!m.owner.equals(player.getUniqueId()) || open.get(player.getUniqueId()) != m || !access(player)) { player.closeInventory(); return; }
+        if (!m.owner.equals(player.getUniqueId()) || open.get(player.getUniqueId()) != m || !access(player)) {
+            // Bukkit forbids closeInventory() inside InventoryClickEvent; close a stale menu next tick.
+            Bukkit.getScheduler().runTask(plugin,() -> {
+                var view = player.getOpenInventory();
+                if (player.isOnline() && view != null && view.getTopInventory() != null
+                        && view.getTopInventory().getHolder() == m) player.closeInventory();
+            });
+            return;
+        }
         if (!event.isLeftClick() || event.isShiftClick() || event.getClick() != org.bukkit.event.inventory.ClickType.LEFT) return;
         int slot = event.getRawSlot();
         if (slot < 0 || slot >= m.inventory.getSize()) return;

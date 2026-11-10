@@ -5,8 +5,8 @@ import hashlib,json,sys,zipfile
 root=Path(__file__).resolve().parents[1]
 out=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else root/'dist'
 out.mkdir(parents=True,exist_ok=True)
-plugin=root/'build/libs/VaultBackupPro-1.2.0.jar'
-helper=root/'build/libs/vaultbackup-restore-1.2.0.jar'
+plugin=root/'build/libs/VaultBackupPro-1.2.1.jar'
+helper=root/'build/libs/vaultbackup-restore-1.2.1.jar'
 expected=(root/'release/SHA256SUMS.txt').read_text().splitlines()[0].split()[0]
 assert hashlib.sha256(plugin.read_bytes()).hexdigest()==expected, 'Untested plugin bytes'
 with zipfile.ZipFile(plugin) as z:assert z.read('vaultbackup-restore.jar')==helper.read_bytes()
@@ -23,15 +23,15 @@ for name in allowed:
 common={name:p for name,p in source.items() if
  ('/' not in name and p.suffix in {'.md','.txt'}) or
  name.startswith(('helpers/','third-party/','docs/','tools/runtime-tests/'))}
-common['VaultBackupPro-1.2.0.jar']=plugin
-common['helpers/vaultbackup-restore-1.2.0.jar']=helper
+common['VaultBackupPro-1.2.1.jar']=plugin
+common['helpers/vaultbackup-restore-1.2.1.jar']=helper
 source.update(common)
 manifest=[]
 for kind,files in [('plugin',common),('source',source)]:
- base=f'VaultBackupPro-1.2.0-{kind}';dest=out/(base+'.zip')
+ base=f'VaultBackupPro-1.2.1-{kind}';dest=out/(base+'.zip')
  with zipfile.ZipFile(dest,'w',zipfile.ZIP_DEFLATED) as z:
   for name,p in sorted(files.items()):
-   info=zipfile.ZipInfo(base+'/'+name,(2026,10,13,0,0,0));info.create_system=3
+   info=zipfile.ZipInfo(base+'/'+name,(2026,11,10,0,0,0));info.create_system=3
    info.external_attr=(0o100755 if p.name=='gradlew' or p.suffix=='.sh' else 0o100644)<<16
    z.writestr(info,p.read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
  with zipfile.ZipFile(dest) as z:

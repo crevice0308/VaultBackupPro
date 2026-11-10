@@ -10,6 +10,7 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 
 /** Immutable, fully validated configuration. Reload replaces this object only after validation. */
 public record PluginSettings(Path serverRoot, Path backupDirectory, Path stateDirectory,
@@ -31,14 +32,22 @@ public record PluginSettings(Path serverRoot, Path backupDirectory, Path stateDi
         // Keep the configured lexical root intact, even when missing, a file or a symlink.
         // The startup coordinator acquires its lifetime guard before classifying those as
         // HARD_CONFLICT. Never create or resolve away an unsafe root during config parsing.
+        // A filesystem root can never be restored, though: that is purely a configuration error.
+        if (root.getParent() == null) throw invalid(y, "settings.rootparent");
         Path backup = resolve(y, root, requiredString(y, "storage.backup-directory", "../VaultBackup-backups"));
         Path state = resolve(y, root, requiredString(y, "storage.state-directory", "../VaultBackup-state"));
         Path helper = resolve(y, root, requiredString(y, "restore.helper-jar", "../VaultBackup-state/helper/vaultbackup-restore.jar"));
-        if (backup.startsWith(root) || state.startsWith(root))
+        // Reject ancestors here too. Otherwise the restore guard refuses them later as a
+        // startup conflict, which stops the whole server on every start instead of this plugin.
+        if (backup.startsWith(root) || state.startsWith(root) || root.startsWith(backup) || root.startsWith(state))
             throw invalid(y, "settings.external");
         if (backup.equals(state) || backup.startsWith(state) || state.startsWith(backup))
             throw invalid(y, "settings.separate");
-        if (!helper.startsWith(state)) throw invalid(y, "settings.helper");
+        // The helper is installed by overwriting this path: it must be a dedicated .jar file,
+        // never the state directory itself, a journal/guard file, or anything under restore-jobs.
+        if (!helper.startsWith(state) || helper.equals(state) || helper.startsWith(state.resolve("restore-jobs"))
+                || !helper.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".jar"))
+            throw invalid(y, "settings.helper");
         List<String> includes = stringList(y, "backup.include");
         List<String> excludes = stringList(y, "backup.exclude");
         if (includes.isEmpty()) throw invalid(y, "settings.include");

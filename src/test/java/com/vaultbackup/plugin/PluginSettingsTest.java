@@ -19,6 +19,11 @@ public final class PluginSettingsTest {
   try{PluginSettings.from(y).options();}catch(IllegalArgumentException|java.io.IOException expected){rejected=true;}
   if(!rejected)throw new AssertionError("Accepted invalid "+key+"="+value);checks++;
  }
+ static void rejectAll(Map<String,Object> values) throws Exception {
+  var y=base();for(var entry:values.entrySet())y.set(entry.getKey(),entry.getValue());boolean rejected=false;
+  try{PluginSettings.from(y).options();}catch(IllegalArgumentException|java.io.IOException expected){rejected=true;}
+  if(!rejected)throw new AssertionError("Accepted invalid "+values);checks++;
+ }
  public static void main(String[] args)throws Exception {
   template=Files.readString(Path.of(args[0]));base=Files.createTempDirectory("vaultbackup-config-test-");root=Files.createDirectory(base.resolve("server"));
   var s=PluginSettings.from(base());s.options();if(s.maxEntries()!=100000||s.intervalMinutes()!=60||s.discordEnabled()||!s.language().equals("ja_JP"))throw new AssertionError("defaults");checks++;
@@ -103,6 +108,30 @@ public final class PluginSettingsTest {
   var y=base();y.set("retention.max-count",0);y.set("retention.max-bytes",0L);var unlimited=PluginSettings.from(y);if(unlimited.retentionCount()!=0||unlimited.retentionBytes()!=0)throw new AssertionError();checks++;
   y=base();y.set("notifications.discord.enabled",true);y.set("notifications.discord.webhook-url","https://discord.com/api/webhooks/123/fake_unit_test_token");PluginSettings.from(y);checks++;
   Path link=base.resolve("linked");Files.createSymbolicLink(link,root);reject("storage.backup-directory",link.resolve("nested").toString());
+  // Storage that contains server-root is a configuration error. Before 1.2.1 it passed parsing and
+  // then failed the restore guard as a startup conflict, which stops the whole server on every start.
+  Path elsewhere=Files.createTempDirectory("vaultbackup-config-elsewhere-");
+  rejectAll(Map.<String,Object>of("storage.backup-directory",base.toString(),"storage.state-directory",elsewhere.resolve("state").toString(),
+   "restore.helper-jar",elsewhere.resolve("state/helper/vaultbackup-restore.jar").toString()));
+  rejectAll(Map.<String,Object>of("storage.state-directory",base.toString(),"storage.backup-directory",elsewhere.resolve("backups").toString(),
+   "restore.helper-jar",base.resolve("helper/vaultbackup-restore.jar").toString()));
+  var filesystemRoot=base();filesystemRoot.set("storage.server-root",root.getRoot().toString());
+  try{PluginSettings.from(filesystemRoot);throw new AssertionError("filesystem root accepted as server-root");}
+  catch(IllegalArgumentException expected){if(!expected.getMessage().equals(Messages.text("ja_JP","settings.rootparent")))throw new AssertionError("filesystem root diagnostic",expected);}checks++;
+  // The helper path is overwritten on install: never the state directory, a journal, or a non-JAR file.
+  reject("restore.helper-jar",base.resolve("state").toString());
+  reject("restore.helper-jar",base.resolve("state/restore-jobs/vaultbackup-restore.jar").toString());
+  reject("restore.helper-jar",base.resolve("state/active-restore.properties").toString());
+  var upperJar=base();upperJar.set("restore.helper-jar",base.resolve("state/tools/VaultBackup-Restore.JAR").toString());PluginSettings.from(upperJar);checks++;
+  // Discord payloads must stay valid JSON for any text and within Discord's content limit.
+  String json=DiscordNotifier.payload("tab\tquote\" back\\ nl\n cr\r nul\u0000 del\u007f ls\u2028 日本語");
+  if(!json.equals("{\"content\":\"VaultBackup Pro: tab\\tquote\\\" back\\\\ nl\\n cr\\r nul\\u0000 del\\u007f ls\\u2028 日本語\",\"allowed_mentions\":{\"parse\":[]}}"))
+   throw new AssertionError("Discord JSON encoding: "+json);checks++;
+  if(json.chars().anyMatch(c->c<0x20))throw new AssertionError("raw control character in Discord JSON");checks++;
+  String longJson=DiscordNotifier.payload("x".repeat(5000));
+  if(longJson.length()>2000||!longJson.contains("x…\""))throw new AssertionError("Discord content limit");checks++;
+  String emoji=DiscordNotifier.payload("y".repeat(DiscordNotifier.MAX_CONTENT-"VaultBackup Pro: ".length()-1)+"😀😀");
+  if(emoji.chars().anyMatch(c->Character.isHighSurrogate((char)c)))throw new AssertionError("truncation split a surrogate pair");checks++;
   System.out.println("PASS "+checks+" configuration validations (no webhook requests sent)");
  }
 }

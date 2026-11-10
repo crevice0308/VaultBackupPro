@@ -1,5 +1,5 @@
 VaultBackup Pro
-Version: 1.2.0
-Revision: DirectAdminActions
+Version: 1.2.1
+Revision: SecurityAndReliabilityFixes
 License: GPL-3.0-only
 Default artifacts: obfuscated

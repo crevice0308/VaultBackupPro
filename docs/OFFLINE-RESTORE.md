@@ -67,10 +67,10 @@ Windows:
 restore.cmd C:\absolute\state\restore-jobs\JOB-ID\job.properties
 ```
 
-The wrapper requires typing `STOPPED`. Direct invocation requires both explicit flags:
+The wrapper does not prompt for input: running it is the operator's explicit confirmation, and it passes `--manual --i-confirm-server-stopped` (or `--recover --i-confirm-server-stopped`) for you. The helper still independently refuses a living server JVM, a held root guard and active world locks. Direct invocation requires both explicit flags:
 
 ```sh
-java -jar vaultbackup-restore-1.2.0.jar --job /absolute/job.properties --manual --i-confirm-server-stopped
+java -jar vaultbackup-restore-1.2.1.jar --job /absolute/job.properties --manual --i-confirm-server-stopped
 ```
 
 Manual invocation never bypasses a living recorded JVM, uncertain/reused PID identity, the root lock, active world session locks, or a cancellation tombstone. It cannot silently resume an interrupted swap. Older protocol-v1 jobs require explicit stopped-server review/manual execution; the new automatic waiting path refuses them. Existing correctly authenticated success receipts remain readable.

@@ -7,8 +7,8 @@ Linux: `./gradlew clean release check`
 Windows: `gradlew.bat clean release check`
 
 ## 生成物
-- build/libs/VaultBackupPro-1.2.0.jar — 難読化したプラグイン。独立ヘルパーを内蔵
-- build/libs/vaultbackup-restore-1.2.0.jar — 難読化した独立復元ヘルパー
+- build/libs/VaultBackupPro-1.2.1.jar — 難読化したプラグイン。独立ヘルパーを内蔵
+- build/libs/vaultbackup-restore-1.2.1.jar — 難読化した独立復元ヘルパー
 
 この改訂では ProGuard 7.10.0 でシンボルを難読化します。縮小・最適化は行いません。公開ソースと .pro 設定からビルドできます。難読化はソースを秘匿するものではありません。API は compileOnly で、サーバー API や Minecraft/Spigot サーバー本体を JAR に同梱しません。JAR 内の順序・タイムスタンプは再現しやすい設定です。実際の配布物はテスト結果の SHA-256 と照合してください。
 

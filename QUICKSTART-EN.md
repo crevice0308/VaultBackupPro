@@ -1,6 +1,6 @@
-# VaultBackup Pro 1.2.0 — Quick start
+# VaultBackup Pro 1.2.1 — Quick start
 
-Install one VaultBackupPro-1.2.0.jar in plugins while the server is stopped. Do not extract the JAR or keep another VaultBackup version beside it. Use Java25 and a tested Paper, Purpur or Spigot26.2/26.3 build. Read TEST-RESULTS.md for exact versions and untested platforms.
+Install one VaultBackupPro-1.2.1.jar in plugins while the server is stopped. Do not extract the JAR or keep another VaultBackup version beside it. Use Java25 and a tested Paper, Purpur or Spigot26.2/26.3 build. Read TEST-RESULTS.md for exact versions and untested platforms.
 
 Japanese is the default. Set language: en_US in plugins/VaultBackupPro/config.yml and use /backup reload for English. Existing configurations are preserved. A helper for an already-reserved restore keeps the language recorded when that job was created.
 

@@ -59,6 +59,9 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             settings = PluginSettings.read(getDataFolder().toPath().resolve("config.yml"));
             if (!supported()) { getServer().getPluginManager().disablePlugin(this); return; }
             ServerLifecycle.configureLanguage(language());
+            // An absent state directory cannot contain a restore journal or guard, so failing to
+            // create it is a configuration problem: disable the plugin, do not stop the server.
+            prepareStateDirectory();
             // Acquire the lifetime root guard before opening the engine or requiring the root.
             restoreGuardStartupFailure = true;
             RestoreCoordinator.StartupResult startup = RestoreCoordinator.start(settings.serverRoot(),
@@ -137,21 +140,33 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    private void prepareStateDirectory() throws IOException {
+        Path state = settings.stateDirectory();
+        if (Files.exists(state, LinkOption.NOFOLLOW_LINKS)) return;
+        try { createPrivateDirectories(state); }
+        catch (IOException error) { throw new IOException(text("startup.statedir", state), error); }
+    }
+
     private void installHelper() throws Exception {
         try (InputStream input = getResource("vaultbackup-restore.jar")) {
             if (input == null) { getLogger().warning(text("helper.missing")); return; }
             byte[] data = input.readAllBytes();
+            byte[] bundled = MessageDigest.getInstance("SHA-256").digest(data);
             Path target = settings.helperJar();
             if (Files.isSymbolicLink(target)) throw new IOException(text("helper.symlink"));
-            if (Files.isRegularFile(target) && MessageDigest.isEqual(MessageDigest.getInstance("SHA-256").digest(data),
-                    MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(target)))) return;
-            // Do not replace a helper used by an unfinished restore job; coordinator validates journals before use.
-            if (Files.exists(settings.stateDirectory().resolve("active-restore.properties")))
-                throw new IOException(text("helper.pending"));
-            createPrivateDirectories(target.getParent());
-            Path temp = Files.createTempFile(target.getParent(), ".helper-", ".tmp");
-            try { Files.write(temp, data); Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
-            finally { Files.deleteIfExists(temp); }
+            boolean current = Files.isRegularFile(target, LinkOption.NOFOLLOW_LINKS) && MessageDigest.isEqual(bundled,
+                    MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(target)));
+            if (!current) {
+                // Do not replace a helper used by an unfinished restore job; coordinator validates journals before use.
+                if (Files.exists(settings.stateDirectory().resolve("active-restore.properties")))
+                    throw new IOException(text("helper.pending"));
+                createPrivateDirectories(target.getParent());
+                Path temp = Files.createTempFile(target.getParent(), ".helper-", ".tmp");
+                try { Files.write(temp, data); Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
+                finally { Files.deleteIfExists(temp); }
+            }
+            // Launch only these exact bytes: a helper swapped on disk later is refused, not executed.
+            restores.requireHelperSha256(HexFormat.of().formatHex(bundled));
         }
     }
 
@@ -330,8 +345,12 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         }
         autosave.clear();
     }
-    private void updateCatalogue() throws IOException {
-        catalogue = List.copyOf(engine.listBackups());
+    /**
+     * revalidate re-reads every archive (startup and administrator refresh/list). Internal
+     * follow-ups reuse this engine's earlier full verification of files that are provably unchanged.
+     */
+    private void updateCatalogue(boolean revalidate) throws IOException {
+        catalogue = List.copyOf(revalidate ? engine.revalidateBackups(this::isCancelled, p -> progress = p) : engine.listBackups());
         freeSpace = Files.getFileStore(settings.backupDirectory()).getUsableSpace();
     }
     void refresh(CommandSender sender, Runnable after) {
@@ -343,7 +362,7 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             return;
         }
         if (!begin(sender, "operation.catalogue")) return;
-        submit(() -> { try { updateCatalogue(); main(() -> { if (after != null) after.run(); }); }
+        submit(() -> { try { updateCatalogue(true); main(() -> { if (after != null) after.run(); }); }
             catch (Exception error) { reportFailure(sender, "job.list", error); }
             finally { main(this::finish); } });
     }
@@ -354,16 +373,15 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         if (!allowed(sender,"restore")) return;
         if (busy()) { tell(sender,text("job.busy",operation()),false); return; }
         if (restoreReserved()) { tell(sender,text("restore.pending"),false); return; }
-        Optional<BackupRecord> selected = find(id);
-        if (selected.isEmpty()) { tell(sender,text("list.unknown"),false); return; }
+        if (find(id).isEmpty()) { tell(sender,text("list.unknown"),false); return; }
         if (!Files.isRegularFile(settings.helperJar())) { tell(sender,text("restore.helpermissing"),false); return; }
         if (!begin(sender,"operation.verify")) return;
-        BackupRecord record = selected.get();
         tell(sender,text("restore.verifying",id),true);
         submit(() -> {
             String preparedToken = null;
             try {
-                engine.verify(id, this::isCancelled, p -> progress = p);
+                // Reserve exactly what was just verified, never the possibly stale catalogue entry.
+                BackupRecord record = engine.verify(id, this::isCancelled, p -> progress = p);
                 if (isCancelled()) { main(this::finish); return; }
                 restores.setLanguage(helperLanguage());
                 RestoreCoordinator.Reservation reservation = restores.reserve(record.id(), record.zipPath(),
@@ -392,6 +410,8 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         try {
             if (isCancelled()) { restores.cancel(token); return; }
             RestoreCoordinator.LaunchResult result = restores.confirm(token);
+            // The reason (e.g. helper could not start) is otherwise only in the job directory, if anywhere.
+            if (!result.helperReady()) getLogger().warning(text("job.diagnostic", result.message()));
             armedJob = result.jobId();
             refreshRestoreState();
             main(() -> {
@@ -472,7 +492,7 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             try {
                 if (isCancelled()) return;
                 engine.delete(id, restores.protectedBackupIds());
-                updateCatalogue();
+                updateCatalogue(false);
                 main(() -> {
                     tell(sender,text("delete.done", id),true);
                     if (sender instanceof Player p && p.isOnline()) menus.openList(p,0);

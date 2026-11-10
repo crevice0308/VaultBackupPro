@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
@@ -40,6 +41,8 @@ public final class BackupEngine {
     public static final long MAX_MANIFEST_BYTES = 128L * 1024 * 1024;
     private static final int BUFFER_SIZE = 128 * 1024;
     private static final Pattern ID = Pattern.compile("[0-9]{8}T[0-9]{9}Z-[a-f0-9]{12}");
+    /** Exactly the temporary names createBackup uses; nothing else in the store is ever swept. */
+    private static final Pattern ABANDONED_PART = Pattern.compile("\\.[0-9]{8}T[0-9]{9}Z-[a-f0-9]{12}\\.(?:zip|properties)\\.part");
     private static final Pattern HASH = Pattern.compile("[0-9a-f]{64}");
     private static final DateTimeFormatter ID_TIME = DateTimeFormatter.ofPattern("uuuuMMdd'T'HHmmssSSS'Z'").withZone(ZoneOffset.UTC);
     private static final BooleanSupplier NEVER_CANCEL = () -> false;
@@ -53,6 +56,16 @@ public final class BackupEngine {
 
     public record ManifestEntry(String path, boolean directory, long size, String sha256) { }
     private record Source(Path path, String name, boolean directory, BasicFileAttributes attributes) { }
+    /** Identity, size and timestamps of an archive/sidecar pair at the moment it fully verified. */
+    private record Fingerprint(Object zipKey, long zipSize, FileTime zipModified, FileTime zipCreated,
+                               Object metadataKey, long metadataSize, FileTime metadataModified, FileTime metadataCreated) { }
+    private record VerifiedArchive(Fingerprint fingerprint, BackupRecord record) { }
+    /**
+     * Archives this instance fully verified, keyed by ID. A listing reuses an entry only while
+     * both files are provably the same, unchanged files; any difference forces full verification.
+     * Explicit verify() and revalidateBackups() always re-read every byte. Guarded by this.
+     */
+    private final Map<String, VerifiedArchive> verifiedArchives = new HashMap<>();
 
     public BackupEngine(BackupOptions options) throws IOException {
         this.options = Objects.requireNonNull(options);
@@ -80,6 +93,7 @@ public final class BackupEngine {
         checkedExistingDirectory(root);
         checkedExistingDirectory(destination);
         try (FileChannel lockChannel = openLock(); FileLock ignored = acquireLock(lockChannel)) {
+            removeAbandonedPartFiles();
             String id = ID_TIME.format(Instant.now()) + "-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
             Path tempZip = destination.resolve("." + id + ".zip.part");
             Path zip = destination.resolve(id + ".zip");
@@ -91,7 +105,7 @@ public final class BackupEngine {
                 List<Source> sources = scan(cancelled);
                 List<ManifestEntry> manifest = new ArrayList<>();
                 long total = 0;
-                try (FileChannel channel = FileChannel.open(tempZip, CREATE_NEW, WRITE, NOFOLLOW_LINKS);
+                try (FileChannel channel = createPrivateFile(tempZip);
                      ZipOutputStream output = new ZipOutputStream(Channels.newOutputStream(channel), StandardCharsets.UTF_8)) {
                     output.setLevel(options.compressionLevel());
                     byte[] buffer = new byte[BUFFER_SIZE];
@@ -162,13 +176,28 @@ public final class BackupEngine {
         return createBackup(label, NEVER_CANCEL, NO_PROGRESS);
     }
 
-    /** Returns only archives whose sidecar, whole-file hash, manifest and every entry verify. */
+    /**
+     * Returns only archives whose sidecar, whole-file hash, manifest and every entry verified.
+     * An archive this instance already verified is not re-read while both of its files keep the
+     * same file identity, size and timestamps; anything else is verified in full again. Use
+     * revalidateBackups() to re-read every archive regardless.
+     */
     public synchronized List<BackupRecord> listBackups() throws IOException {
         return listBackups(NEVER_CANCEL, NO_PROGRESS);
     }
 
     public synchronized List<BackupRecord> listBackups(BooleanSupplier cancelled, Consumer<String> progress) throws IOException {
+        return catalogue(cancelled, progress, false);
+    }
+
+    /** Re-reads and re-hashes every archive, ignoring earlier verification results. */
+    public synchronized List<BackupRecord> revalidateBackups(BooleanSupplier cancelled, Consumer<String> progress) throws IOException {
+        return catalogue(cancelled, progress, true);
+    }
+
+    private List<BackupRecord> catalogue(BooleanSupplier cancelled, Consumer<String> progress, boolean revalidate) throws IOException {
         List<BackupRecord> good = new ArrayList<>();
+        Set<String> present = new HashSet<>();
         checkedExistingDirectory(destination);
         try (DirectoryStream<Path> paths = Files.newDirectoryStream(destination, "*.properties")) {
             for (Path path : paths) {
@@ -176,21 +205,52 @@ public final class BackupEngine {
                 String name = path.getFileName().toString();
                 String id = name.substring(0, name.length() - ".properties".length());
                 if (!ID.matcher(id).matches()) continue;
+                present.add(id);
                 try {
-                    good.add(verify(id, cancelled, progress));
+                    BackupRecord unchanged = revalidate ? null : unchangedVerified(id);
+                    good.add(unchanged != null ? unchanged : verify(id, cancelled, progress));
                 } catch (InterruptedIOException e) { throw e; }
                 catch (IOException e) { reporter(progress).accept("Ignoring incomplete or corrupt backup " + id + ": " + e.getMessage()); }
             }
         }
+        verifiedArchives.keySet().retainAll(present);
         good.sort(Comparator.comparing(BackupRecord::createdAt).reversed().thenComparing(BackupRecord::id));
         return List.copyOf(good);
     }
 
+    /** Always performs full verification, then remembers the result only if the files did not change meanwhile. */
     public synchronized BackupRecord verify(String id, BooleanSupplier cancelled, Consumer<String> progress) throws IOException {
         validateId(id);
         checkedExistingDirectory(destination);
-        return verifyArchive(destination.resolve(id + ".zip"), destination.resolve(id + ".properties"),
-                options, cancellation(cancelled), reporter(progress));
+        Path zip = destination.resolve(id + ".zip");
+        Path metadata = destination.resolve(id + ".properties");
+        verifiedArchives.remove(id);
+        Fingerprint before = fingerprint(zip, metadata);
+        BackupRecord record = verifyArchive(zip, metadata, options, cancellation(cancelled), reporter(progress));
+        Fingerprint after = fingerprint(zip, metadata);
+        if (before != null && before.equals(after)) verifiedArchives.put(id, new VerifiedArchive(after, record));
+        return record;
+    }
+
+    private BackupRecord unchangedVerified(String id) {
+        VerifiedArchive known = verifiedArchives.get(id);
+        if (known == null) return null;
+        Fingerprint now = fingerprint(destination.resolve(id + ".zip"), destination.resolve(id + ".properties"));
+        if (known.fingerprint().equals(now)) return known.record();
+        verifiedArchives.remove(id);
+        return null;
+    }
+
+    /** Null when either file is missing, unsafe or unreadable; a null fingerprint never matches. */
+    private static Fingerprint fingerprint(Path zip, Path metadata) {
+        try {
+            BasicFileAttributes z = ensureRegularFile(zip);
+            BasicFileAttributes m = ensureRegularFile(metadata);
+            return new Fingerprint(z.fileKey(), z.size(), z.lastModifiedTime(), z.creationTime(),
+                    m.fileKey(), m.size(), m.lastModifiedTime(), m.creationTime());
+        } catch (IOException | RuntimeException unavailable) {
+            return null;
+        }
     }
 
     public BackupRecord verify(String id) throws IOException { return verify(id, NEVER_CANCEL, NO_PROGRESS); }
@@ -266,11 +326,41 @@ public final class BackupEngine {
     private void removeRecord(BackupRecord target) throws IOException {
         ensureRegularFile(target.zipPath());
         ensureRegularFile(target.metadataPath());
+        verifiedArchives.remove(target.id());
         // Withdraw the commit marker first, so an interrupted delete is never listed.
         Files.delete(target.metadataPath());
         syncDirectory(destination);
         Files.delete(target.zipPath());
         syncDirectory(destination);
+    }
+
+    /**
+     * Caller holds the store lock. Only createBackup writes ".ID.zip.part" / ".ID.properties.part"
+     * files, and always under that lock, so any found now were left by a crash or a forced JVM
+     * stop and would otherwise occupy disk space forever. Best effort: never blocks a backup.
+     */
+    private void removeAbandonedPartFiles() {
+        List<Path> abandoned = new ArrayList<>();
+        try (DirectoryStream<Path> paths = Files.newDirectoryStream(destination, ".*.part")) {
+            for (Path path : paths) if (ABANDONED_PART.matcher(path.getFileName().toString()).matches()) abandoned.add(path);
+        } catch (IOException | DirectoryIteratorException unreadable) { return; }
+        for (Path path : abandoned) {
+            try {
+                BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class, NOFOLLOW_LINKS);
+                if (attributes.isRegularFile() && !attributes.isSymbolicLink()) Files.deleteIfExists(path);
+            } catch (IOException ignored) { /* Leave it for the next attempt; never fail the backup over cleanup. */ }
+        }
+    }
+
+    /** Archives and sidecars contain server secrets: create them owner-only where POSIX permissions exist. */
+    private static FileChannel createPrivateFile(Path path) throws IOException {
+        Set<OpenOption> open = Set.of(CREATE_NEW, WRITE, NOFOLLOW_LINKS);
+        try {
+            return FileChannel.open(path, open, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        } catch (UnsupportedOperationException nonPosix) {
+            // Windows and other non-POSIX stores keep the directory's inherited ACL.
+            return FileChannel.open(path, open);
+        }
     }
 
     private FileChannel openLock() throws IOException {
@@ -521,7 +611,7 @@ public final class BackupEngine {
         metadata.setProperty("totalBytes", Long.toString(record.totalBytes()));
         metadata.setProperty("entryCount", Integer.toString(record.entryCount()));
         metadata.setProperty("sha256", record.sha256());
-        try (FileChannel channel = FileChannel.open(target, CREATE_NEW, WRITE, NOFOLLOW_LINKS)) {
+        try (FileChannel channel = createPrivateFile(target)) {
             OutputStream output = Channels.newOutputStream(channel);
             metadata.store(output, "VaultBackup Pro completed archive metadata v1");
             output.flush();
