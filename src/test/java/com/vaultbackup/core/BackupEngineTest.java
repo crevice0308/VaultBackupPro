@@ -29,6 +29,7 @@ public final class BackupEngineTest {
     public static void main(String[] args) throws Exception {
         if (args.length == 2 && args[0].equals("--locale-child")) { localeChild(Path.of(args[1])); return; }
         if (args.length == 3 && args[0].equals("--memory-child")) { memoryChild(Path.of(args[1]), Path.of(args[2])); return; }
+        if (args.length == 2 && args[0].equals("--lock-child")) { lockChild(Path.of(args[1])); return; }
         fixture = Files.createTempDirectory("vaultbackup-core-test-");
         try {
             roundTripAndExclusions();
@@ -53,6 +54,11 @@ public final class BackupEngineTest {
             craftedArchivesStayWithinMemory();
             spaceIsCheckedBeforeAndWhileWriting();
             fileNamesNeedARepresentableEncoding();
+            readsCannotBeRedirectedOutsideTheRoot();
+            recentTimestampsProveNothing();
+            vanishedFilesAreCountedAndAnEmptyResultIsRefused();
+            sessionLockIsNeverOpened();
+            unreadableFilesAreFoundBeforeCopying();
             System.out.println("PASS BackupEngineTest (" + checks + " checks)");
         } finally {
             try (var paths = Files.walk(fixture)) {
@@ -576,6 +582,8 @@ public final class BackupEngineTest {
         long millis = (System.nanoTime() - started) / 1_000_000;
         check(millis < 15_000, "400 vanished files do not each cost a wait (took " + millis + " ms)");
         equal(archived(afterReset).keySet(), Set.of("zz-keep.txt"), "vanished files are skipped and the rest is archived");
+        equal(afterReset.vanishedEntries(), 400, "the backup records how many files were gone when they were to be copied");
+        equal(reset.listBackups().get(0).vanishedEntries(), 400, "and the count is read back from the store");
     }
 
     /** The one thing a change may never do is redirect the copy outside the server root. */
@@ -900,6 +908,266 @@ public final class BackupEngineTest {
         String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         check(process.waitFor(60, TimeUnit.SECONDS) && process.exitValue() == 0, "child JVM without a UTF-8 locale: " + output);
         check(output.contains("LOCALE-CHILD-OK"), "child completed its checks: " + output);
+    }
+
+    /**
+     * The checks before a file is opened and the open itself are separate steps. Whoever can change
+     * directories inside the server root between them must not thereby get a file from outside it
+     * into the archive, nor make the backup wait forever on something that is not a file.
+     */
+    private static void readsCannotBeRedirectedOutsideTheRoot() throws Exception {
+        BackupEngine engine = engine("redirect");
+        Path root = engine.serverRoot(), outside = Files.createDirectory(fixture.resolve("redirect/outside"));
+        Files.createDirectories(root.resolve("uploads"));
+        Files.writeString(root.resolve("uploads/f.txt"), "INSIDE");
+        Files.writeString(root.resolve("keep.txt"), "keep");
+        Files.writeString(outside.resolve("f.txt"), "SECRET"); // the same length, so that sizes agree
+        boolean links = true;
+        try { Files.createSymbolicLink(fixture.resolve("redirect/probe-link"), outside); }
+        catch (UnsupportedOperationException | IOException unsupported) { links = false; }
+        if (!links) return;
+        Path real = root.resolve("uploads"), parked = fixture.resolve("redirect/parked");
+        // Exactly the window: the directory is a symlink while the file is opened, and a directory again when it is looked at afterwards.
+        engine.beforeOpenProbe = name -> {
+            if (!name.equals("uploads/f.txt") || Files.isSymbolicLink(real)) return;
+            try { Files.move(real, parked); Files.createSymbolicLink(real, outside); }
+            catch (IOException e) { throw new UncheckedIOException(e); }
+        };
+        engine.afterReadProbe = name -> {
+            if (!name.equals("uploads/f.txt") || !Files.isSymbolicLink(real)) return;
+            try { Files.delete(real); Files.move(parked, real); }
+            catch (IOException e) { throw new UncheckedIOException(e); }
+        };
+        BackupRecord record = null;
+        try { record = engine.createBackup("redirect"); }
+        catch (IOException refused) {
+            check(refused.getMessage().contains("symlink"), "a directory swapped for a symlink at the moment of the open is refused: " + refused.getMessage());
+        }
+        engine.beforeOpenProbe = null;
+        engine.afterReadProbe = null;
+        if (Files.isSymbolicLink(real)) { Files.delete(real); Files.move(parked, real); }
+        boolean relativeOpens;
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(root)) { relativeOpens = stream instanceof SecureDirectoryStream<Path>; }
+        if (relativeOpens) check(record == null, "where files are opened relative to their directory, the swapped directory is refused at the open itself");
+        // Refusing is the expected outcome; whatever the outcome, content from outside the root is never archived.
+        if (record != null) check(!"SECRET".equals(text(archived(record), "uploads/f.txt")), "content from outside the server root must never be archived");
+        for (BackupRecord kept : engine.listBackups())
+            check(archived(kept).values().stream().noneMatch(bytes -> new String(bytes, StandardCharsets.UTF_8).contains("SECRET")), "no archive holds the outside file");
+        equal(text(archived(engine.createBackup("clean")), "uploads/f.txt"), "INSIDE", "the same tree backs up normally afterwards");
+
+        // Something that is not a file takes the place of a file right before it is opened: opening a
+        // FIFO would wait for a writer for ever. The backup must come back, with a refusal.
+        Path pipeTarget = root.resolve("uploads/queue.dat");
+        Files.writeString(pipeTarget, "data");
+        Process probe;
+        try { probe = new ProcessBuilder("mkfifo", fixture.resolve("redirect/fifo-probe").toString()).start(); }
+        catch (IOException noMkfifo) { return; }
+        if (!probe.waitFor(10, TimeUnit.SECONDS) || probe.exitValue() != 0) return;
+        engine.beforeOpenProbe = name -> {
+            if (!name.equals("uploads/queue.dat")) return;
+            try {
+                Files.deleteIfExists(pipeTarget);
+                Process make = new ProcessBuilder("mkfifo", pipeTarget.toString()).start();
+                if (!make.waitFor(10, TimeUnit.SECONDS) || make.exitValue() != 0) throw new IOException("mkfifo failed");
+            } catch (IOException e) { throw new UncheckedIOException(e); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new IllegalStateException(e); }
+        };
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<Object> outcome = worker.submit(() -> {
+                try { return engine.createBackup("fifo"); } catch (IOException refused) { return refused; }
+            });
+            Object result;
+            try { result = outcome.get(30, TimeUnit.SECONDS); }
+            catch (TimeoutException hung) {
+                // Release the reader so that the harness can end, then fail.
+                try (OutputStream unblock = Files.newOutputStream(pipeTarget)) { unblock.write(0); }
+                throw new AssertionError("the backup waited on a FIFO that replaced a file");
+            }
+            check(result instanceof IOException refused && refused.getMessage().contains("special file"), "a FIFO in place of a file is refused without being opened: " + result);
+        } finally {
+            worker.shutdownNow();
+            engine.beforeOpenProbe = null;
+            Files.deleteIfExists(pipeTarget);
+        }
+    }
+
+    /**
+     * Filesystems store modification times in steps. A file rewritten within one step has the same
+     * size and time before and after, so those prove nothing while the time is close to now.
+     */
+    private static void recentTimestampsProveNothing() throws Exception {
+        BackupEngine engine = engine("racy");
+        Path file = engine.serverRoot().resolve("data.bin");
+        Files.writeString(file, "AAAA");
+        FileTime written = Files.getLastModifiedTime(file);
+        AtomicInteger looks = new AtomicInteger();
+        // Rewritten in place once, right after the first read, without its time changing.
+        engine.afterReadProbe = name -> {
+            if (!name.equals("data.bin") || looks.getAndIncrement() > 0) return;
+            try { Files.writeString(file, "BBBB", StandardOpenOption.WRITE); Files.setLastModifiedTime(file, written); }
+            catch (IOException e) { throw new UncheckedIOException(e); }
+        };
+        List<String> unstable = new ArrayList<>();
+        BackupRecord record = engine.createBackup("racy", () -> false, ignored -> {}, unstable::add);
+        equal(text(archived(record), "data.bin"), "BBBB", "a rewrite hidden by an unchanged timestamp is noticed by reading twice");
+        equal(unstable, List.of(), "and the file is stable once two reads agree");
+        // Rewritten after every read: no two reads agree, and it is reported instead of being called stable.
+        AtomicInteger turn = new AtomicInteger();
+        engine.afterReadProbe = name -> {
+            if (!name.equals("data.bin")) return;
+            try { Files.writeString(file, turn.incrementAndGet() % 2 == 0 ? "CCCC" : "DDDD", StandardOpenOption.WRITE); Files.setLastModifiedTime(file, written); }
+            catch (IOException e) { throw new UncheckedIOException(e); }
+        };
+        unstable.clear();
+        record = engine.createBackup("racy-always", () -> false, ignored -> {}, unstable::add);
+        equal(unstable, List.of("data.bin"), "a file that changes behind an unchanged timestamp on every look is reported");
+        equal(record.unstableEntries(), 1, "and counted");
+        engine.afterReadProbe = null;
+        // An old timestamp is evidence: nothing is read twice. (A read is counted by the probe before each open.)
+        Files.setLastModifiedTime(file, FileTime.from(Instant.now().minusSeconds(3600)));
+        AtomicInteger opens = new AtomicInteger();
+        engine.beforeOpenProbe = name -> { if (name.equals("data.bin")) opens.incrementAndGet(); };
+        engine.createBackup("settled");
+        equal(opens.get(), 1, "a file with an old modification time is read once");
+        Files.setLastModifiedTime(file, FileTime.from(Instant.now()));
+        opens.set(0);
+        engine.createBackup("fresh");
+        equal(opens.get(), 2, "a file modified just now is read twice");
+        engine.beforeOpenProbe = null;
+
+        // Too large to read twice: the copy waits until the time is old enough to mean something.
+        BackupEngine large = engine("racy-large");
+        byte[] big = new byte[9 * 1024 * 1024];
+        new Random(5).nextBytes(big);
+        Path bigFile = large.serverRoot().resolve("big.bin");
+        Files.write(bigFile, big);
+        large.racyTimestampMillis = 700;
+        unstable.clear();
+        long started = System.nanoTime();
+        BackupRecord waited = large.createBackup("wait", () -> false, ignored -> {}, unstable::add);
+        long millis = (System.nanoTime() - started) / 1_000_000;
+        check(unstable.isEmpty() && Arrays.equals(archived(waited).get("big.bin"), big), "a large file written just now is archived as stable after the wait");
+        check(millis >= 300, "the copy waited for the timestamp to settle (took " + millis + " ms)");
+        // When waiting is not possible, the file is not called stable on the strength of such a timestamp.
+        large.racyTimestampMillis = 3_600_000;
+        Files.setLastModifiedTime(bigFile, FileTime.from(Instant.now()));
+        unstable.clear();
+        BackupRecord unproven = large.createBackup("unproven", () -> false, ignored -> {}, unstable::add);
+        equal(unstable, List.of("big.bin"), "a large file whose timestamp cannot be trusted is reported, not called stable");
+        check(Arrays.equals(archived(unproven).get("big.bin"), big), "it is archived all the same");
+        // A time far in the future is not "now" either: rewriting the file would replace it.
+        Files.setLastModifiedTime(bigFile, FileTime.from(Instant.now().plusSeconds(86_400 * 30L)));
+        large.racyTimestampMillis = 3000;
+        unstable.clear();
+        large.createBackup("future", () -> false, ignored -> {}, unstable::add);
+        equal(unstable, List.of(), "a file dated far in the future is not held up or reported");
+    }
+
+    private static void vanishedFilesAreCountedAndAnEmptyResultIsRefused() throws Exception {
+        BackupEngine engine = engine("vanish");
+        Path data = Files.createDirectories(engine.serverRoot().resolve("data"));
+        for (int i = 0; i < 30; i++) Files.writeString(data.resolve("f" + i + ".txt"), "content " + i);
+        Files.createDirectories(engine.serverRoot().resolve("empty-dir"));
+        BackupRecord good = engine.createBackup("good");
+        equal(good.vanishedEntries(), 0, "nothing vanished from a quiet tree");
+        // A few files go: counted, named, and the rest is a backup.
+        List<String> vanished = new ArrayList<>();
+        AtomicBoolean done = new AtomicBoolean();
+        BackupRecord partial = engine.createBackup("partial", () -> false, message -> {
+            if (message.startsWith("Backing up data/") && done.compareAndSet(false, true)) {
+                try { for (int i = 20; i < 23; i++) Files.delete(data.resolve("f" + i + ".txt")); }
+                catch (IOException e) { throw new UncheckedIOException(e); }
+            }
+        }, ignored -> {}, vanished::add);
+        equal(vanished, List.of("data/f20.txt", "data/f21.txt", "data/f22.txt"), "every vanished file is named");
+        equal(partial.vanishedEntries(), 3, "and counted in the record");
+        equal(archived(partial).size(), 27, "the files that were there are archived");
+        // The whole tree is moved away after it was listed (unmounted, renamed, deleted): what is left
+        // would verify as an archive, and retention would delete real backups for it.
+        Path away = fixture.resolve("vanish/moved-away");
+        done.set(false);
+        try {
+            engine.createBackup("gone", () -> false, message -> {
+                if (message.startsWith("Backing up data/") && done.compareAndSet(false, true)) {
+                    try { Files.move(data, away); } catch (IOException e) { throw new UncheckedIOException(e); }
+                }
+            }, ignored -> {});
+            throw new AssertionError("an archive without a single file was published");
+        } catch (BackupEngine.SourceVanishedException gone) {
+            equal(gone.scanned(), 27, "the refusal says how many files there were");
+        }
+        equal(engine.listBackups().stream().map(BackupRecord::label).sorted().toList(), List.of("good", "partial"), "nothing was published, and the real backups are untouched");
+        try (var files = Files.list(engine.backupDirectory())) {
+            check(files.noneMatch(path -> path.getFileName().toString().endsWith(".part")), "no partial file is left behind");
+        }
+    }
+
+    /**
+     * On POSIX a process loses its lock on a file when it closes any handle of that file. The server
+     * holds a lock on each world's session.lock; a backup that read the file from inside the server
+     * would release it without anybody noticing.
+     */
+    private static void sessionLockIsNeverOpened() throws Exception {
+        Path base = Files.createDirectory(fixture.resolve("session-lock"));
+        Path root = Files.createDirectory(base.resolve("server"));
+        Path world = Files.createDirectories(root.resolve("world"));
+        Files.writeString(world.resolve("level.dat"), "level");
+        Path sessionLock = world.resolve("session.lock");
+        Files.writeString(sessionLock, "\u2603");
+        Files.writeString(root.resolve("session.lock.txt"), "an ordinary file");
+        // A configuration that selects everything and excludes nothing.
+        BackupEngine engine = new BackupEngine(options(BackupOptions.defaults(root, base.resolve("backups"), base.resolve("state")),
+                List.of("**"), List.of(), 1000, 1 << 20, 1 << 24, 1000));
+        AtomicBoolean opened = new AtomicBoolean();
+        engine.beforeOpenProbe = name -> { if (name.endsWith("/session.lock")) opened.set(true); };
+        try (FileChannel channel = FileChannel.open(sessionLock, StandardOpenOption.WRITE); FileLock held = channel.lock()) {
+            BackupRecord record = engine.createBackup("locked");
+            equal(archived(record).keySet(), Set.of("world/level.dat", "session.lock.txt"), "session.lock is left out whatever the patterns select; similar names are not");
+            check(!opened.get() && held.isValid(), "the file is never opened");
+            String launcher = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+            ProcessBuilder child = new ProcessBuilder(launcher, "-cp", System.getProperty("java.class.path"), BackupEngineTest.class.getName(), "--lock-child", sessionLock.toString());
+            child.environment().remove("JAVA_TOOL_OPTIONS");
+            child.redirectErrorStream(true);
+            Process process = child.start();
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            check(process.waitFor(60, TimeUnit.SECONDS) && process.exitValue() == 0 && output.contains("LOCK-CHILD HELD"),
+                    "another process still finds the world locked after a backup: " + output);
+        } finally { engine.beforeOpenProbe = null; }
+    }
+
+    private static void lockChild(Path file) throws Exception {
+        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.WRITE)) {
+            FileLock lock = channel.tryLock();
+            System.out.println(lock == null ? "LOCK-CHILD HELD" : "LOCK-CHILD FREE");
+        }
+    }
+
+    /** A file the server may not read is one of the problems that are reported together, before anything is copied. */
+    private static void unreadableFilesAreFoundBeforeCopying() throws Exception {
+        BackupEngine engine = engine("unreadable");
+        Path root = engine.serverRoot();
+        Files.writeString(root.resolve("fine.txt"), "fine");
+        Path secret = root.resolve("secret.key"), other = root.resolve("other.key");
+        Files.writeString(secret, "secret");
+        Files.writeString(other, "other");
+        if (!Files.getFileStore(root).supportsFileAttributeView(PosixFileAttributeView.class)) return;
+        Files.setPosixFilePermissions(secret, PosixFilePermissions.fromString("---------"));
+        Files.setPosixFilePermissions(other, PosixFilePermissions.fromString("---------"));
+        try {
+            if (Files.isReadable(secret)) return; // The harness runs as a user that ignores permission bits.
+            AtomicBoolean copying = new AtomicBoolean();
+            try {
+                engine.createBackup("unreadable", () -> false, message -> { if (message.startsWith("Backing up")) copying.set(true); }, ignored -> {});
+                throw new AssertionError("a tree with unreadable files was backed up");
+            } catch (BackupEngine.SourceRefusedException refused) {
+                equal(refused.total(), 2, "both unreadable files are reported at once");
+                check(refused.problems().stream().allMatch(problem -> problem.contains("cannot be read")) && !copying.get(), "before anything is copied: " + refused.problems());
+            }
+        } finally {
+            Files.setPosixFilePermissions(secret, PosixFilePermissions.fromString("rw-------"));
+            Files.setPosixFilePermissions(other, PosixFilePermissions.fromString("rw-------"));
+        }
     }
 
     private static void memoryChild(Path zip, Path metadata) throws Exception {

@@ -11,6 +11,8 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.nio.channels.SeekableByteChannel;
+import java.nio.file.attribute.BasicFileAttributeView;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
@@ -53,6 +55,10 @@ public final class BackupEngine {
     private static final long[] REAPPEAR_WAIT_MILLIS = {25, 75};
     /** All such pauses of one backup together; a mass deletion must not stall the backup while autosave is off. */
     private static final long REAPPEAR_BUDGET_MILLIS = 2_000;
+    /** Total time one backup may wait for modification times to become old enough to mean something. */
+    private static final long RACY_WAIT_BUDGET_MILLIS = 30_000;
+    /** Regular files that are never opened, whatever the configuration selects; see scan(). */
+    private static final Set<String> NEVER_OPENED = Set.of("session.lock");
     /** Free space the backup store must keep, so a growing archive never fills a disk the server also writes to. */
     private static final long SPACE_RESERVE_BYTES = 64L * 1024 * 1024;
     /** Free space is looked at again each time this much has been written. */
@@ -95,6 +101,23 @@ public final class BackupEngine {
      */
     public static final String PHASE_VERIFYING_NEW_ARCHIVE = "Verifying new archive";
 
+    /**
+     * Every file was gone when it was to be copied: the tree is being moved, deleted or unmounted.
+     * Nothing was published: an archive without files would verify, and retention would then remove
+     * real backups for it.
+     */
+    public static final class SourceVanishedException extends IOException {
+        private static final long serialVersionUID = 1L;
+        private final int vanished, scanned;
+        SourceVanishedException(int vanished, int scanned) {
+            super("All " + scanned + " files disappeared while the backup was running; the server files are being moved, deleted or unmounted. No backup was kept.");
+            this.vanished = vanished;
+            this.scanned = scanned;
+        }
+        public int vanished() { return vanished; }
+        public int scanned() { return scanned; }
+    }
+
     public static final class SourceRefusedException extends IOException {
         private static final long serialVersionUID = 1L;
         private final List<String> problems;
@@ -136,6 +159,14 @@ public final class BackupEngine {
      * looked at again, i.e. at the one point where a concurrent writer makes the read unstable.
      */
     volatile Consumer<String> afterReadProbe;
+    /** Test seam only: called with the archive path right before a source file is opened. */
+    volatile Consumer<String> beforeOpenProbe;
+    /**
+     * Filesystems store modification times in steps of up to two seconds. A file rewritten within
+     * the same step keeps its time, so while the time is this close to now it proves nothing.
+     * (Not final: tests shorten it.)
+     */
+    volatile long racyTimestampMillis = 3000;
     /** Test seam only: replaces the free space reported by the backup store. */
     volatile java.util.function.LongSupplier usableSpaceProbe;
 
@@ -181,9 +212,21 @@ public final class BackupEngine {
      */
     public synchronized BackupRecord createBackup(String label, BooleanSupplier cancelled, Consumer<String> progress,
                                                     Consumer<String> unstable) throws IOException {
+        return createBackup(label, cancelled, progress, unstable, null);
+    }
+
+    /**
+     * @param vanished receives the archive path of every file that existed when the tree was listed
+     *                 and was gone when it was to be copied. Such a file is not in the backup; the
+     *                 count is stored with it.
+     * @throws SourceVanishedException when that happened to every file
+     */
+    public synchronized BackupRecord createBackup(String label, BooleanSupplier cancelled, Consumer<String> progress,
+                                                    Consumer<String> unstable, Consumer<String> vanished) throws IOException {
         cancelled = cancellation(cancelled);
         progress = reporter(progress);
         unstable = reporter(unstable);
+        vanished = reporter(vanished);
         if (label == null) label = "";
         if (label.length() > 200 || label.chars().anyMatch(Character::isISOControl)) throw new IOException("Label must be at most 200 printable characters");
         checkCancelled(cancelled);
@@ -215,8 +258,8 @@ public final class BackupEngine {
                 requireSpace(store, estimateArchiveBytes(scannedBytes));
                 List<ManifestEntry> manifest = new ArrayList<>(sources.size());
                 long total = 0;
-                int unstableEntries = 0;
-                long[] reappearBudget = {REAPPEAR_BUDGET_MILLIS};
+                int unstableEntries = 0, vanishedFiles = 0;
+                long[] reappearBudget = {REAPPEAR_BUDGET_MILLIS}, racyBudget = {RACY_WAIT_BUDGET_MILLIS};
                 MessageDigest archiveDigest = sha256();
                 try (FileChannel channel = createPrivateFile(tempZip);
                      ZipOutputStream output = new ZipOutputStream(new DigestOutputStream(
@@ -236,8 +279,12 @@ public final class BackupEngine {
                             continue;
                         }
                         progress.accept("Backing up " + source.name());
-                        Copied copied = copyFile(source, output, buffer, total, store, reappearBudget, cancelled);
-                        if (copied == null) continue; // Deleted since the scan: a legitimate state of a live tree.
+                        Copied copied = copyFile(source, output, buffer, total, store, reappearBudget, racyBudget, cancelled);
+                        if (copied == null) { // Deleted since the scan: a legitimate state of a live tree, within limits.
+                            vanishedFiles++;
+                            vanished.accept(source.name());
+                            continue;
+                        }
                         total = boundedAdd(total, copied.size(), options.maxTotalBytes(), "Backup exceeds total byte limit");
                         manifest.add(new ManifestEntry(source.name(), false, copied.size(), copied.sha256()));
                         if (!copied.stable()) {
@@ -249,6 +296,10 @@ public final class BackupEngine {
                             nextSpaceCheck = total + SPACE_CHECK_INTERVAL_BYTES;
                         }
                     }
+                    // Files vanish from a live tree, sometimes many at once (a world or an arena being
+                    // reset). They are counted and reported. But when not one file is left, the tree
+                    // itself went away, and what remains is not a backup of anything.
+                    if (vanishedFiles == files) throw new SourceVanishedException(vanishedFiles, files);
                     ZipEntry manifestEntry = new ZipEntry(MANIFEST_PATH);
                     output.putNextEntry(manifestEntry);
                     long manifestSize = writeManifest(output, manifest);
@@ -262,7 +313,7 @@ public final class BackupEngine {
                 // The digest covers exactly the bytes handed to the file; validateArchive re-reads the
                 // file from disk below, so a write that did not reach storage intact cannot be published.
                 BackupRecord provisional = new BackupRecord(id, Instant.now(), label, tempZip, tempMetadata,
-                        Files.size(tempZip), total, manifest.size(), hex(archiveDigest.digest()), unstableEntries);
+                        Files.size(tempZip), total, manifest.size(), hex(archiveDigest.digest()), unstableEntries, vanishedFiles);
                 writeMetadata(tempMetadata, provisional);
                 progress.accept(PHASE_VERIFYING_NEW_ARCHIVE);
                 validateArchive(provisional, options, cancelled, progress);
@@ -273,7 +324,7 @@ public final class BackupEngine {
                 syncDirectory(destination); // Persist publication before retention may remove older generations.
                 committed = true;
                 BackupRecord record = new BackupRecord(id, provisional.createdAt(), label, zip, metadata,
-                        provisional.compressedBytes(), total, manifest.size(), provisional.sha256(), unstableEntries);
+                        provisional.compressedBytes(), total, manifest.size(), provisional.sha256(), unstableEntries, vanishedFiles);
                 // Fully verified a moment ago under its temporary name; renaming changes neither file.
                 Fingerprint published = fingerprint(zip, metadata);
                 if (published != null) verifiedArchives.put(id, new VerifiedArchive(published, record));
@@ -424,7 +475,7 @@ public final class BackupEngine {
      * complete version is open; a file rewritten in place is read again until two looks agree.
      */
     private Copied copyFile(Source source, ZipOutputStream output, byte[] buffer, long totalSoFar, FileStore store,
-                            long[] reappearBudget, BooleanSupplier cancelled) throws IOException {
+                            long[] reappearBudget, long[] racyBudget, BooleanSupplier cancelled) throws IOException {
         byte[] lastRead = null;
         BasicFileAttributes lastSeen = null;
         for (int attempt = 1; attempt <= STABLE_READ_ATTEMPTS; attempt++) {
@@ -433,26 +484,84 @@ public final class BackupEngine {
             if (before == null) before = awaitReappearance(source, reappearBudget, cancelled);
             if (before == null) return null; // Deleted meanwhile; an earlier partial look at it is not archived.
             if (before.size() > options.maxEntryBytes()) throw new IOException("File exceeds entry byte limit: " + source.name());
-            if (before.size() > STABLE_READ_BYTES) return streamLargeFile(source, before, output, buffer, totalSoFar, store, cancelled);
-            byte[] bytes;
-            try (InputStream input = Channels.newInputStream(Files.newByteChannel(source.path(), Set.of(READ, NOFOLLOW_LINKS)))) {
-                bytes = input.readNBytes(STABLE_READ_BYTES + 1);
-            } catch (NoSuchFileException replacedMeanwhile) { continue; }
+            if (before.size() > STABLE_READ_BYTES) return streamLargeFile(source, before, output, buffer, totalSoFar, store, racyBudget, cancelled);
+            byte[] bytes = readBuffered(source);
+            if (bytes == null) continue; // Replaced at that moment; look again.
             if (bytes.length > STABLE_READ_BYTES) continue; // Grew past the in-memory bound while open; look again.
             lastRead = bytes;
             lastSeen = before;
             probeAfterRead(source);
             BasicFileAttributes after = regularOrNull(source);
-            if (after != null && sameVersion(before, after) && bytes.length == before.size())
-                return writeBuffered(source, before, bytes, output, totalSoFar, true);
+            if (after != null && sameVersion(before, after) && bytes.length == before.size()) {
+                // Unchanged size and time prove nothing while the time is too close to now (see
+                // racyTimestampMillis). Two reads that agree are the evidence then.
+                if (racyMillis(after) <= 0 || Arrays.equals(bytes, readBuffered(source)))
+                    return writeBuffered(source, before, bytes, output, totalSoFar, true);
+            }
         }
         if (lastRead == null) {
             // Every look found it absent for a moment or grown past the in-memory bound.
             BasicFileAttributes now = regularOrNull(source);
             if (now == null) return null;
-            return streamLargeFile(source, now, output, buffer, totalSoFar, store, cancelled);
+            return streamLargeFile(source, now, output, buffer, totalSoFar, store, racyBudget, cancelled);
         }
         return writeBuffered(source, lastSeen, lastRead, output, totalSoFar, false);
+    }
+
+    /** The file's content, read once; null when nothing exists at the path right now. */
+    private byte[] readBuffered(Source source) throws IOException {
+        try (InputStream input = Channels.newInputStream(openForRead(source))) {
+            return input.readNBytes(STABLE_READ_BYTES + 1);
+        } catch (NoSuchFileException gone) { return null; }
+    }
+
+    /** How much longer the modification time stays too recent to prove that the file did not change; 0 or less when it can. */
+    private long racyMillis(BasicFileAttributes attributes) {
+        long window = racyTimestampMillis;
+        long age = System.currentTimeMillis() - attributes.lastModifiedTime().toMillis();
+        // A time further in the future than the window is not "now" either: a rewrite would replace it.
+        return age < -window ? 0 : window - age;
+    }
+
+    /**
+     * Opens a file below the server root for reading without following a symlink anywhere on the way.
+     * Where the platform opens files relative to a directory handle (POSIX), every step from the root
+     * is taken that way: a directory swapped for a symlink between a check and the open can then not
+     * redirect the read outside the tree. Elsewhere the path is checked immediately before.
+     */
+    private SeekableByteChannel openForRead(Source source) throws IOException {
+        Consumer<String> probe = beforeOpenProbe;
+        if (probe != null) probe.accept(source.name());
+        Path relative = root.relativize(source.path());
+        List<DirectoryStream<Path>> opened = new ArrayList<>();
+        try {
+            DirectoryStream<Path> top = Files.newDirectoryStream(root);
+            opened.add(top);
+            if (!(top instanceof SecureDirectoryStream<Path> secureRoot)) {
+                requireNoSymlinkBelowRoot(source);
+                return Files.newByteChannel(source.path(), Set.of(READ, NOFOLLOW_LINKS));
+            }
+            SecureDirectoryStream<Path> directory = secureRoot;
+            for (int i = 0; i < relative.getNameCount() - 1; i++) {
+                try { directory = directory.newDirectoryStream(relative.getName(i), NOFOLLOW_LINKS); }
+                catch (NoSuchFileException | AccessDeniedException plain) { throw plain; }
+                catch (FileSystemException replaced) {
+                    throw new IOException("A directory became a symlink or another kind of file during the backup: "
+                            + printable(relative.subpath(0, i + 1).toString().replace(root.getFileSystem().getSeparator(), "/")), replaced);
+                }
+                opened.add(directory);
+            }
+            Path name = relative.getFileName();
+            BasicFileAttributes attributes = directory.getFileAttributeView(name, BasicFileAttributeView.class, NOFOLLOW_LINKS).readAttributes();
+            // Opening a FIFO or a device would block or read something that is not a file.
+            if (attributes.isSymbolicLink() || !attributes.isRegularFile())
+                throw new IOException("Source file was replaced by a symlink or special file: " + source.name());
+            return directory.newByteChannel(name, Set.of(READ, NOFOLLOW_LINKS));
+        } finally {
+            for (int i = opened.size() - 1; i >= 0; i--) {
+                try { opened.get(i).close(); } catch (IOException ignored) { /* a read-only directory handle */ }
+            }
+        }
     }
 
     private Copied writeBuffered(Source source, BasicFileAttributes attributes, byte[] bytes, ZipOutputStream output,
@@ -474,9 +583,21 @@ public final class BackupEngine {
      * another file while the complete earlier version stayed open. Otherwise it is reported.
      */
     private Copied streamLargeFile(Source source, BasicFileAttributes before, ZipOutputStream output, byte[] buffer,
-                                   long totalSoFar, FileStore store, BooleanSupplier cancelled) throws IOException {
-        FileChannel channel;
-        try { channel = FileChannel.open(source.path(), Set.of(READ, NOFOLLOW_LINKS)); }
+                                   long totalSoFar, FileStore store, long[] racyBudget, BooleanSupplier cancelled) throws IOException {
+        // With a modification time this close to now, a rewrite during the copy might not show
+        // afterwards (see racyTimestampMillis). Everything a save has just written reaches that age
+        // together, so one short wait usually covers the whole backup; the budget bounds the rest.
+        long wait = racyMillis(before);
+        if (wait > 0 && racyBudget[0] >= wait) {
+            racyBudget[0] -= wait;
+            pause(wait, cancelled);
+            before = regularOrNull(source);
+            if (before == null) return null;
+            if (before.size() > options.maxEntryBytes()) throw new IOException("File exceeds entry byte limit: " + source.name());
+        }
+        boolean provable = racyMillis(before) <= 0;
+        SeekableByteChannel channel;
+        try { channel = openForRead(source); }
         catch (NoSuchFileException gone) { return null; }
         try (channel) {
             ZipEntry entry = new ZipEntry(source.name());
@@ -506,7 +627,7 @@ public final class BackupEngine {
             // Replaced by rename (or deleted) while open: the open file is the complete earlier version
             // as long as nothing changed its length after it was looked at.
             boolean replaced = (after == null || !sameIdentity(before, after)) && copied == before.size() && openSize == before.size();
-            return new Copied(copied, hex(digest.digest()), unchanged || replaced);
+            return new Copied(copied, hex(digest.digest()), provable && (unchanged || replaced));
         }
     }
 
@@ -795,11 +916,16 @@ public final class BackupEngine {
             @Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
                 checkCancelled(cancelled);
                 if (isAutomaticallyExcluded(file)) return FileVisitResult.CONTINUE;
+                // Whatever the configuration selects. On POSIX a process loses its lock on a file as soon
+                // as it closes any handle of that file, so reading the world's session.lock inside the
+                // server would silently release the lock that keeps a second server off the world.
+                if (NEVER_OPENED.contains(file.getFileName().toString())) return FileVisitResult.CONTINUE;
                 String name = relative(file);
                 if (denied(name, false) || !included(name)) return FileVisitResult.CONTINUE;
                 if (attrs.isSymbolicLink()) problem(name, "symlink (not followed)");
                 else if (!attrs.isRegularFile()) problem(name, "not a regular file");
                 else if (attrs.size() > options.maxEntryBytes()) problem(name, "larger than limits.max-entry-bytes");
+                else if (!Files.isReadable(file)) problem(name, "cannot be read by the server process");
                 else addSource(file, name, false, attrs);
                 return FileVisitResult.CONTINUE;
             }
@@ -1035,6 +1161,8 @@ public final class BackupEngine {
         metadata.setProperty("sha256", record.sha256());
         // Optional field (absent before 1.3.0): files that kept changing while they were copied.
         metadata.setProperty("unstableEntries", Integer.toString(record.unstableEntries()));
+        // Optional field (absent before 1.3.0): files that were gone when they were to be copied.
+        metadata.setProperty("vanishedEntries", Integer.toString(record.vanishedEntries()));
         try (FileChannel channel = createPrivateFile(target)) {
             OutputStream output = Channels.newOutputStream(channel);
             metadata.store(output, "VaultBackup Pro completed archive metadata v1");
@@ -1063,9 +1191,10 @@ public final class BackupEngine {
             int count = Integer.parseInt(required(metadata, "entryCount"));
             String label = required(metadata, "label");
             int unstable = Integer.parseInt(metadata.getProperty("unstableEntries", "0"));
-            if (bytes < 1 || total < 0 || count < 0 || unstable < 0 || unstable > count || label.length() > 200 || label.chars().anyMatch(Character::isISOControl)) throw new IOException("Invalid archive metadata");
+            int vanished = Integer.parseInt(metadata.getProperty("vanishedEntries", "0"));
+            if (bytes < 1 || total < 0 || count < 0 || unstable < 0 || unstable > count || vanished < 0 || label.length() > 200 || label.chars().anyMatch(Character::isISOControl)) throw new IOException("Invalid archive metadata");
             return new BackupRecord(id, Instant.parse(required(metadata, "createdAt")), label,
-                    zip.toAbsolutePath().normalize(), path.toAbsolutePath().normalize(), bytes, total, count, digest, unstable);
+                    zip.toAbsolutePath().normalize(), path.toAbsolutePath().normalize(), bytes, total, count, digest, unstable, vanished);
         } catch (RuntimeException e) { throw new IOException("Malformed metadata", e); }
     }
 
