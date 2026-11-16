@@ -37,6 +37,7 @@ public final class RestoreSafetyTest {
             confirmationRaceTest(temp.resolve("confirm-cancel-race"));
             deadHelperTest(temp.resolve("dead-helper"));
             killedParentTest(temp.resolve("killed-parent"));
+            terminalSignalsTest(temp.resolve("terminal-signals"));
             disabledPluginTest(temp.resolve("plugin-disabled"));
             reloadedPluginTest(temp.resolve("plugin-reloaded"));
             integration(temp.resolve("success"),false);
@@ -404,6 +405,33 @@ public final class RestoreSafetyTest {
         awaitConfirmedDead(dir,job,Duration.ofSeconds(10),"crash helper exit",f);
         RestoreCoordinator restarted=new RestoreCoordinator(root,f.resolve("backups"),f.resolve("state"),helperJar);check(restarted.startupFailure().isPresent(),"safe failed crash reservation is reported on restart");check(restarted.status().isEmpty(),"dead failed reservation is durably disarmed before startup cleanup");
         Process retry=helper(file,"--manual","--i-confirm-server-stopped");check(retry.waitFor(10,java.util.concurrent.TimeUnit.SECONDS) && retry.exitValue()==3,"startup-disarmed failed job cannot be manually resumed later");
+    }
+    /**
+     * A helper started by the server shares its terminal and process group. A screen or tmux session
+     * that ends with the server hangs up everything in it, and Ctrl+C on the console reaches the helper
+     * too. Either used to kill the helper at the very moment it was meant to start working.
+     */
+    private static void terminalSignalsTest(Path f)throws Exception {
+        Path root=fixture(f);Process parent=spawn("--parent",f.toString(),helperJar.toString());
+        try {
+            Path file=ready(f,parent),dir=file.getParent();Properties job=RestoreFiles.load(file);
+            long pid=Long.parseLong(RestoreFiles.load(dir.resolve("helper-process.properties")).getProperty("pid"));
+            ProcessHandle helper=ProcessHandle.of(pid).orElseThrow(()->new AssertionError("helper process not found"));
+            boolean sent=true;
+            for(String signal:List.of("-HUP","-INT")) {
+                try {
+                    Process kill=new ProcessBuilder("kill",signal,Long.toString(pid)).redirectErrorStream(true).start();
+                    sent&=kill.waitFor(10,java.util.concurrent.TimeUnit.SECONDS) && kill.exitValue()==0;
+                } catch(IOException noKillCommand) {sent=false;}
+            }
+            if(sent) { // Platforms without these signals have nothing to check here.
+                Thread.sleep(800);
+                check(helper.isAlive() && statusEquals(dir,"WAITING_FOR_MANUAL_STOP"),"a waiting helper survives the hang-up and interrupt signals of the server's terminal");
+            }
+            Files.createFile(f.resolve("stop.request"));check(parent.waitFor(10,java.util.concurrent.TimeUnit.SECONDS),"the server exits normally afterwards");
+            await(()->statusEquals(dir,"SUCCESS"),Duration.ofSeconds(20),"restore after terminal signals",null,f);
+            check(Files.readString(root.resolve("world/level.dat")).equals("BACKUP") && Files.readString(Path.of(job.getProperty("rollback")).resolve("world/level.dat")).equals("ORIGINAL"),"and the restore is applied");
+        } finally {if(parent.isAlive()){parent.destroyForcibly();parent.waitFor();}}
     }
     /**
      * Spigot has no API that says whether the server is stopping. Its marker therefore only says

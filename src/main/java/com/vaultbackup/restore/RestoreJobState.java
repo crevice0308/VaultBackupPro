@@ -79,7 +79,15 @@ final class RestoreJobState {
         p.setProperty("authentication",RestoreFiles.hmac(RestoreFiles.required(job,"nonce"),processPayload(p)));
         RestoreFiles.write(dir.resolve("helper-process.properties"),p);
     }
+    /**
+     * Whether the helper of this job is certainly not running. A helper holds helper.lock from its
+     * first step to its exit, so a free lock settles it, also for a helper that never got as far as
+     * recording itself (the server died while starting it). Only where the filesystem cannot answer
+     * does the recorded process ID decide.
+     */
     static boolean confirmedDead(Path dir,Properties job)throws IOException {
+        Boolean unlocked=RestoreFiles.unlocked(dir.resolve("helper.lock"));
+        if(unlocked!=null)return unlocked;
         Path file=dir.resolve("helper-process.properties");if(!Files.exists(file,RestoreFiles.NOFOLLOW))return false;
         Properties p=RestoreFiles.load(file);
         if(!RestoreFiles.required(job,"jobId").equals(RestoreFiles.required(p,"jobId"))
@@ -119,9 +127,8 @@ final class RestoreJobState {
         String recorded=p.getProperty("root","");
         if(recorded.isEmpty())return Original.UNKNOWN;
         if(!Files.isDirectory(candidate,RestoreFiles.NOFOLLOW) || Files.isSymbolicLink(candidate))return Original.NO;
-        String actual=RestoreFiles.fileIdentity(candidate);
-        if(actual.isEmpty())return Original.UNKNOWN;
-        return actual.equals(recorded)?Original.YES:Original.NO;
+        Boolean same=RestoreFiles.sameFile(recorded,RestoreFiles.fileIdentity(candidate));
+        return same==null?Original.UNKNOWN:same?Original.YES:Original.NO;
     }
     private static String identityPayload(Properties p)throws IOException {
         return String.join("\n",RestoreFiles.required(p,"jobId"),p.getProperty("root",""));
@@ -190,17 +197,30 @@ final class RestoreJobState {
         requireNormalShutdown(dir,job,Instant.now());
     }
     static void requireNormalShutdown(Path dir,Properties job,Instant observedExit)throws IOException {
+        requireNormalShutdown(dir,job,observedExit,null);
+    }
+    /**
+     * @param sinceFirstSeen how long ago, by a clock that cannot be set, the waiting helper first saw
+     *                       this marker; null when nobody watched (the caller then has wall-clock times only)
+     */
+    static void requireNormalShutdown(Path dir,Properties job,Instant observedExit,Duration sinceFirstSeen)throws IOException {
         Properties p=RestoreFiles.load(dir.resolve("normal-stop.properties"));
         for(String key:List.of("jobId","parentPid","parentStartedAt"))
             if(!RestoreFiles.required(job,key).equals(RestoreFiles.required(p,key)))throw new IOException("Normal-stop intent does not match recorded server JVM");
         if(!RestoreFiles.constantEquals(RestoreFiles.required(p,"authentication"),RestoreFiles.hmac(RestoreFiles.required(job,"nonce"),shutdownPayload(p))))throw new IOException("Normal-stop intent authentication failed");
+        // The authenticated text joins its fields with line breaks. A field that could contain one
+        // would let one marker be read as another, so the time must be a time, whatever the evidence.
+        Instant requested;
+        try {requested=Instant.parse(RestoreFiles.required(p,"requestedAt"));}
+        catch(RuntimeException e){throw new IOException("Invalid normal-stop timestamp",e);}
         // Markers written before 1.3.0 carry no evidence field; they were only ever written on the server shutdown path.
         String evidence=p.getProperty("evidence",EVIDENCE_SERVER_STOPPING);
         if(evidence.equals(EVIDENCE_SERVER_STOPPING))return;
         if(!evidence.equals(EVIDENCE_PLUGIN_DISABLED))throw new IOException("Unknown normal-stop evidence; no restore is permitted");
-        Instant requested;
-        try {requested=Instant.parse(RestoreFiles.required(p,"requestedAt"));}
-        catch(RuntimeException e){throw new IOException("Invalid normal-stop timestamp",e);}
+        // The system clock can be set back, which would make an old marker look recent. The helper's own
+        // measurement since it first saw the marker cannot be.
+        if(sinceFirstSeen!=null && sinceFirstSeen.compareTo(DISABLED_EXIT_GRACE)>0)
+            throw new IOException("The plugin was disabled "+sinceFirstSeen.toMinutes()+" minutes before the server JVM exited, so this exit is not treated as a normal server stop (plugin reload/unload, or a shutdown longer than "+DISABLED_EXIT_GRACE.toMinutes()+" minutes). Nothing was changed. Reserve the restore again and stop the server.");
         Duration elapsed=Duration.between(requested,observedExit);
         if(elapsed.compareTo(DISABLED_EXIT_GRACE)>0)throw new IOException("The plugin was disabled "+elapsed.toMinutes()+" minutes before the server JVM exited, so this exit is not treated as a normal server stop (plugin reload/unload, or a shutdown longer than "+DISABLED_EXIT_GRACE.toMinutes()+" minutes). Nothing was changed. Reserve again after starting the server, or run the helper manually while the server is stopped");
         if(elapsed.compareTo(CLOCK_TOLERANCE.negated())<0)throw new IOException("Normal-stop intent is dated after the observed JVM exit; the system clock is unreliable and no restore is permitted");

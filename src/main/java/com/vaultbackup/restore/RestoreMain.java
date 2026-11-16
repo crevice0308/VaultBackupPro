@@ -26,24 +26,28 @@ public final class RestoreMain {
         if(code!=0)System.exit(code);
     }
     public static int run(String[] args)throws IOException {
-        Path jobFile=null;boolean manual=false,stopped=false,recover=false;
+        Path jobFile=null;boolean manual=false,stopped=false,recover=false,acceptRollback=false;
         for(int i=0;i<args.length;i++) {
             switch(args[i]) {
                 case "--job" -> {if(++i>=args.length)throw new IOException("--job requires a path");jobFile=Path.of(args[i]);}
                 case "--manual" -> manual=true;
                 case "--i-confirm-server-stopped" -> stopped=true;
                 case "--recover" -> {manual=true;recover=true;}
+                case "--accept-rollback-directory" -> acceptRollback=true;
                 default -> throw new IOException("Unknown argument: "+args[i]);
             }
         }
-        if(jobFile==null)throw new IOException("Usage: java -jar vaultbackup-restore.jar --job /absolute/job.properties [--manual --i-confirm-server-stopped | --recover --i-confirm-server-stopped]");
+        if(jobFile==null)throw new IOException("Usage: java -jar vaultbackup-restore.jar --job /absolute/job.properties [--manual --i-confirm-server-stopped | --recover --i-confirm-server-stopped [--accept-rollback-directory]]");
         if(manual!=stopped)throw new IOException("Manual execution/recovery requires both --manual (or --recover) and --i-confirm-server-stopped");
-        Job job=validateJob(jobFile);
+        if(acceptRollback && !recover)throw new IOException("--accept-rollback-directory is only meaningful with --recover");
+        ignoreTerminalSignals(manual);
+        Job job=validateJob(jobFile,recover);
         try(FileChannel helperChannel=RestoreFiles.openLockFile(job.dir.resolve("helper.lock"))) {
             FileLock helperLock;
             try{helperLock=helperChannel.tryLock();}catch(OverlappingFileLockException e){throw new IOException("This restore helper is already running",e);}
             if(helperLock==null)throw new IOException("This restore helper is already running");
             try(helperLock) {
+                boolean childOfServer=false;
                 try {
                     // helper.lock prevents duplicate helpers. job.lock instead linearizes state changes
                     // with the coordinator and is deliberately released for the entire waiting period.
@@ -51,7 +55,7 @@ public final class RestoreMain {
                         if(cancelled(job))return 3;
                         RestoreJobState.requireActive(job.state,job.p);
                         RestoreJobState.recordProcess(job.dir,job.p,ProcessHandle.current());
-                        if(recover){RestoreFiles.requireDeadParent(job.p);try(Guard guard=guard(job)){recover(job);return 0;}}
+                        if(recover){RestoreFiles.requireDeadParent(job.p);try(Guard guard=guard(job)){recover(job,acceptRollback);return 0;}}
                         String status=RestoreFiles.status(job.dir);
                         if(Files.exists(job.dir.resolve("recovery-receipt.properties"),RestoreFiles.NOFOLLOW)) {
                             RestoreJobState.verifiedRecovery(job.dir,job.p);
@@ -61,18 +65,20 @@ public final class RestoreMain {
                         if(!Set.of("COMMITTED","READY","WAITING_FOR_MANUAL_STOP","EXPIRED","FAILED_BEFORE_SWAP").contains(status))throw new IOException("Job journal is "+status+"; inspect it and use --recover while stopped. Never resume an uncertain swap.");
                         if(!manual) {
                             if(!RestoreFiles.required(job.p,"formatVersion").equals("2") || !"MANUAL_NORMAL_STOP".equals(job.p.getProperty("shutdownPolicy")))throw new IOException("Old or unknown job protocol cannot wait automatically; review it using explicit stopped-server manual mode");
-                            validateLivingParent(job.p);
+                            childOfServer=validateLivingParent(job.p);
                             status(job,"WAITING_FOR_MANUAL_STOP","Reserved. Waiting without a time limit for your normal server stop and actual JVM exit. No restart will be performed.");
                         } else RestoreFiles.requireDeadParent(job.p);
                     }
-                    if(!manual && !waitForExit(job))return 3;
+                    MarkerWatch marker=new MarkerWatch(job.dir.resolve("normal-stop.properties"));
+                    if(!manual && !waitForExit(job,childOfServer,marker))return 3;
                     // Taken as soon as the exit is seen: a PLUGIN_DISABLED stop marker is only valid for a prompt exit.
                     Instant exitObserved=Instant.now();
+                    Duration sinceMarker=marker.sinceFirstSeen();
                     try(RestoreJobState.Gate gate=RestoreJobState.requireLock(job.dir)) {
                         if(cancelled(job))return 3;
                         RestoreJobState.requireActive(job.state,job.p);
                         RestoreFiles.requireDeadParent(job.p);
-                        if(!manual)RestoreJobState.requireNormalShutdown(job.dir,job.p,exitObserved);
+                        if(!manual)RestoreJobState.requireNormalShutdown(job.dir,job.p,exitObserved,sinceMarker);
                         try(Guard guard=guard(job)) {
                             RestoreFiles.requireDeadParent(job.p);
                             status(job,"PARENT_EXITED","Server shutdown path and recorded JVM exit confirmed; beginning offline application");
@@ -104,7 +110,41 @@ public final class RestoreMain {
         System.out.println("[VaultBackupPro restore] CANCELLED: "+RestoreFiles.load(job.dir.resolve("status.properties")).getProperty("message",""));
         return true;
     }
-    private static Job validateJob(Path file)throws IOException {
+    /**
+     * A helper started by a server shares its terminal and its process group. When that terminal goes
+     * away with the server (a screen or tmux session whose only program was the server), the kernel
+     * hangs up everything in it, and Ctrl+C on the console reaches the helper as well. Neither may
+     * end a helper that is waiting for exactly that server exit, or is swapping directories.
+     * A helper run by hand keeps Ctrl+C: the operator is at the keyboard.
+     */
+    private static void ignoreTerminalSignals(boolean manual) {
+        for(String name:manual?List.of("HUP"):List.of("HUP","INT")) {
+            try {
+                // No supported API offers this. The classes are looked up by name so that a runtime without them simply behaves as before.
+                Class<?> signal=Class.forName("sun.misc.Signal"),handler=Class.forName("sun.misc.SignalHandler");
+                signal.getMethod("handle",signal,handler).invoke(null,signal.getConstructor(String.class).newInstance(name),handler.getField("SIG_IGN").get(null));
+            } catch(ReflectiveOperationException | RuntimeException | LinkageError unavailable) { /* Not on this platform or runtime. */ }
+        }
+    }
+    /** When the waiting helper first saw the stop marker as it is now, by a clock that cannot be set. */
+    private static final class MarkerWatch {
+        private final Path file;
+        private String seen;
+        private long seenNanos;
+        MarkerWatch(Path file){this.file=file;}
+        void look() {
+            String now;
+            try {
+                now=Files.exists(file,RestoreFiles.NOFOLLOW)?RestoreFiles.fileIdentity(file)+"@"+Files.getLastModifiedTime(file,RestoreFiles.NOFOLLOW).toMillis():null;
+            } catch(IOException replacedThisInstant) {return;}
+            if(now!=null && !now.equals(seen))seenNanos=System.nanoTime();
+            seen=now;
+        }
+        /** Null when there is no marker. */
+        Duration sinceFirstSeen() {look();return seen==null?null:Duration.ofNanos(System.nanoTime()-seenNanos);}
+    }
+    /** For recovery the backup storage is not needed and may be absent (an unmounted disk); only the paths are bound. */
+    private static Job validateJob(Path file,boolean recover)throws IOException {
         file=file.toAbsolutePath().normalize();Properties p=RestoreFiles.load(file);
         if(!Set.of("1","2").contains(RestoreFiles.required(p,"formatVersion")))throw new IOException("Unknown restore job format");
         String id=RestoreFiles.required(p,"jobId");
@@ -117,7 +157,8 @@ public final class RestoreMain {
         if(root.getParent()==null)throw new IOException("Cannot replace filesystem root");
         RestoreFiles.directory(root.getParent(),false);
         if(Files.exists(root,RestoreFiles.NOFOLLOW))RestoreFiles.directory(root,false);
-        Path backups=RestoreFiles.directory(Path.of(RestoreFiles.required(p,"backupDirectory")),false);
+        Path configuredBackups=Path.of(RestoreFiles.required(p,"backupDirectory"));
+        Path backups=recover?configuredBackups.toAbsolutePath().normalize():RestoreFiles.directory(configuredBackups,false);
         RestoreFiles.external(root,state,"State directory");RestoreFiles.external(root,backups,"Backup directory");
         Path archive=Path.of(RestoreFiles.required(p,"archive")).toAbsolutePath().normalize();
         if(!archive.startsWith(backups))throw new IOException("Archive outside bound backup directory");
@@ -132,24 +173,46 @@ public final class RestoreMain {
         if(!path.equals(root.resolveSibling(root.getFileName()+suffix)))throw new IOException("Invalid bound "+key+" path");
         if(Files.isSymbolicLink(path))throw new IOException("Symlink at "+key+" path");return path;
     }
-    private static void validateLivingParent(Properties p)throws IOException {
+    /**
+     * @return true when the recorded server is this helper's own parent process. That relation is then
+     *         what is watched: unlike a start time, it does not move when the system clock is set, and
+     *         a process ID that is reused after the server has exited is never the helper's parent.
+     */
+    private static boolean validateLivingParent(Properties p)throws IOException {
         long pid;
         try{pid=Long.parseLong(RestoreFiles.required(p,"parentPid"));}
         catch(RuntimeException e){throw new IOException("Invalid parent process identity",e);}
         if(pid==ProcessHandle.current().pid())throw new IOException("Helper cannot be its own parent");
+        Optional<ProcessHandle> parent=ProcessHandle.current().parent();
+        if(parent.isPresent() && parent.get().pid()==pid && parent.get().isAlive())return true;
         switch(RestoreFiles.parentLiveness(p)) {
             case ALIVE -> { }
             case GONE -> throw new IOException("Automatic helper must be launched before parent exit; use explicit stopped-server manual mode");
             case UNCERTAIN -> throw new IOException("Parent identity cannot be established; refusing restore");
         }
+        return false;
     }
-    private static boolean waitForExit(Job job)throws IOException {
+    private static RestoreFiles.Liveness serverLiveness(Properties p,boolean childOfServer)throws IOException {
+        if(childOfServer) {
+            Optional<ProcessHandle> parent=ProcessHandle.current().parent();
+            // An orphan is given another parent the moment its parent exits.
+            if(parent.isPresent()) {
+                long pid;
+                try{pid=Long.parseLong(RestoreFiles.required(p,"parentPid"));}
+                catch(RuntimeException e){throw new IOException("Invalid parent process identity",e);}
+                return parent.get().pid()==pid && parent.get().isAlive()?RestoreFiles.Liveness.ALIVE:RestoreFiles.Liveness.GONE;
+            }
+        }
+        return RestoreFiles.parentLiveness(p);
+    }
+    private static boolean waitForExit(Job job,boolean childOfServer,MarkerWatch marker)throws IOException {
         while(true) {
             try(RestoreJobState.Gate gate=RestoreJobState.requireLock(job.dir)) {
                 if(cancelled(job))return false;
                 RestoreJobState.requireActive(job.state,job.p);
             }
-            RestoreFiles.Liveness parent=RestoreFiles.parentLiveness(job.p);
+            marker.look();
+            RestoreFiles.Liveness parent=serverLiveness(job.p,childOfServer);
             if(parent==RestoreFiles.Liveness.GONE)break;
             if(parent==RestoreFiles.Liveness.UNCERTAIN)throw new IOException("Parent process identity became uncertain; refusing restore");
             // There is deliberately no clock deadline after the bounded startup handshake.
@@ -263,7 +326,13 @@ public final class RestoreMain {
             if(error instanceof IOException io)throw io;throw new IOException("Restore failed: "+reason,error);
         }
     }
-    private static void recover(Job job)throws IOException {
+    /** Best effort: an extraction that was never installed is of no use and may be large. */
+    private static String discardStage(Job job) {
+        if(!Files.exists(job.stage,RestoreFiles.NOFOLLOW))return "";
+        try{RestoreFiles.directory(job.stage,false);RestoreFiles.deleteTree(job.stage);return " The unused extraction was removed.";}
+        catch(IOException | RuntimeException kept){return " The unused extraction at "+job.stage+" could not be removed ("+RestoreFiles.reason(kept)+"); delete it by hand.";}
+    }
+    private static void recover(Job job,boolean acceptRollback)throws IOException {
         String status=RestoreFiles.status(job.dir);
         if(Files.exists(job.dir.resolve("recovery-receipt.properties"),RestoreFiles.NOFOLLOW)) {
             RestoreJobState.verifiedRecovery(job.dir,job.p);
@@ -276,8 +345,10 @@ public final class RestoreMain {
             RestoreFiles.directory(job.rollback,false);
             // Only the original root itself is ever moved back. A directory that merely has the rollback
             // name could have been created by another local user with access to the parent directory.
-            if(RestoreJobState.isOriginalRoot(job.dir,job.p,job.rollback)==RestoreJobState.Original.NO)
-                throw new IOException("The directory at "+job.rollback+" is not the original server root recorded by this job. No data changed. Remove or inspect it manually.");
+            // The operator may overrule that after looking at it: on a filesystem that does not keep inode
+            // numbers the original itself can look like another directory.
+            if(!acceptRollback && RestoreJobState.isOriginalRoot(job.dir,job.p,job.rollback)==RestoreJobState.Original.NO)
+                throw new IOException("The directory at "+job.rollback+" does not have the identity of the original server root that this job recorded. Nothing was changed, and it was left where it is. Look at its contents. If it is your original server data, run the recovery again with --accept-rollback-directory added.");
             status(job,"ROLLING_BACK","Explicit stopped-server recovery restoring preserved original root");
             if(Files.exists(job.root,RestoreFiles.NOFOLLOW)) {
                 if(Files.exists(job.failed,RestoreFiles.NOFOLLOW))throw new IOException("Failed-tree preservation target already exists. No data overwritten; manual inspection required.");
@@ -289,8 +360,8 @@ public final class RestoreMain {
             status(job,"RECOVERED","Original root restored. Stage/failed tree preserved. Server remains stopped.");
             System.out.println(RestoreFiles.message(job.p,"Original server-root recovered. No restart performed.","元のサーバーデータを復旧しました。自動再起動は行いません。"));
         } else if(preSwap.contains(status) && Files.isDirectory(job.root,RestoreFiles.NOFOLLOW)) {
-            status(job,"FAILED_BEFORE_SWAP","No original-root move was recorded; current root left untouched. Stage preserved.");
-            System.out.println(RestoreFiles.message(job.p,"No original-root move recorded. Root was left untouched; stage retained.","元データの移動記録はありません。現在のデータと作業領域を保持しました。"));
+            status(job,"FAILED_BEFORE_SWAP","No original-root move was recorded; current root left untouched."+discardStage(job));
+            System.out.println(RestoreFiles.message(job.p,"No original-root move recorded. The server data was left untouched.","元データの移動記録はありません。現在のサーバーデータは変更していません。"));
         } else if(RestoreJobState.isOriginalRoot(job.dir,job.p,job.root)==RestoreJobState.Original.YES) {
             // The journal stopped mid-swap or mid-rollback, but the directory in place is provably the
             // original: the helper was interrupted before it moved it, or after it had moved it back.

@@ -27,7 +27,12 @@ public final class RestoreCoordinator {
         public StartupResult(StartupDisposition disposition, RestoreCoordinator coordinator, String message) { this(disposition,coordinator,message,false); }
     }
     /** What startup found about an earlier restore job, for the administrator. */
-    public enum StartupFinding { NONE, STALE_RESERVATION_CANCELLED, FAILED_RESTORE_ROLLED_BACK }
+    /**
+     * What the previous run left behind, when anything. STALE_RESERVATION_CANCELLED: a reservation that
+     * never got as far as an attempt. RESTORE_NOT_APPLIED: the helper started on it but stopped or was
+     * stopped before it moved the server data. FAILED_RESTORE_ROLLED_BACK: it had moved the data and put it back.
+     */
+    public enum StartupFinding { NONE, STALE_RESERVATION_CANCELLED, RESTORE_NOT_APPLIED, FAILED_RESTORE_ROLLED_BACK }
     /** The server's layout cannot take an offline restore; told at reservation, not after the server was stopped. */
     public static final class RestoreUnavailableException extends IOException {
         private static final long serialVersionUID = 1L;
@@ -69,6 +74,8 @@ public final class RestoreCoordinator {
     private final Instant parentStartedAt;
     private String committedBackupId, startupFailure, ownedJobId;
     private StartupFinding startupFinding=StartupFinding.NONE;
+    /** Startup only: whether the job being resolved leaves an extraction that is to be removed. */
+    private boolean discardStageWhenResolved;
     /** Test seam only: replaces the free space reported for the directory that contains server-root. */
     volatile java.util.function.LongSupplier usableSpaceProbe;
     /** SHA-256 of the helper bundled with the running plugin; null means no expectation was supplied. */
@@ -162,9 +169,12 @@ public final class RestoreCoordinator {
                 } else requirePreSwap(dir,job,current);
                 // Only after positively establishing a pre-swap/restored root may failure
                 // to persist/acknowledge a cancellation become degraded startup.
-                startupFinding=rolledBack?StartupFinding.FAILED_RESTORE_ROLLED_BACK:StartupFinding.STALE_RESERVATION_CANCELLED;
+                boolean notApplied=!rolledBack && Set.of("PARENT_EXITED","STAGING","STAGED","FAILED_BEFORE_SWAP").contains(current);
+                startupFinding=rolledBack?StartupFinding.FAILED_RESTORE_ROLLED_BACK:notApplied?StartupFinding.RESTORE_NOT_APPLIED:StartupFinding.STALE_RESERVATION_CANCELLED;
                 startupFailure=rolledBack?"Restore "+id+" failed after the swap had begun; the helper put the original server data back. The failed data is kept beside server-root."
+                        :notApplied?"Restore "+id+" was not applied; it stopped before the server data was moved ("+current+": "+statusMessage(dir)+"). The current server data was kept."
                         :"Stale restore "+id+" was cancelled; the current server data was kept.";
+                discardStageWhenResolved=!rolledBack;
                 try {
                     RestoreJobState.requestCancellation(dir,job);
                     if(finishStartupCancellation(id,dir,job))return startup(StartupDisposition.READY,startupFailure);
@@ -192,8 +202,23 @@ public final class RestoreCoordinator {
             return startup(StartupDisposition.HARD_CONFLICT,"Restore startup conflict: "+RestoreFiles.reason(e));
         }
     }
+    private static String statusMessage(Path dir) {
+        try{return RestoreFiles.load(dir.resolve("status.properties")).getProperty("message","");}
+        catch(IOException | RuntimeException unreadable){return "";}
+    }
     private void requirePreSwap(Path dir,Properties job,String current)throws IOException {
-        if(!RestoreJobState.waiting(current) && !Set.of("EXPIRED","FAILED_BEFORE_SWAP","CANCELLED").contains(current))
+        // The helper journals MOVING_ORIGINAL durably before it renames anything, and it works under the
+        // root guard, which this JVM holds now. A journal that ends at the extraction therefore means an
+        // extraction that was cut short, with the original root untouched: the helper was killed together
+        // with the server's terminal, service or container. That resolves by itself once the helper is
+        // known to be gone, instead of keeping the server from starting until somebody runs a recovery.
+        boolean interrupted=Set.of("STAGING","STAGED").contains(current);
+        if(interrupted) {
+            if(!RestoreJobState.confirmedDead(dir,job))
+                throw new IOException("Offline restore "+RestoreFiles.required(job,"jobId")+" stopped while extracting ("+current+"), and its helper may still be running. Inspect/recover this job while stopped.");
+            if(RestoreJobState.isOriginalRoot(dir,job,root)==RestoreJobState.Original.NO)
+                throw new IOException("Offline restore "+RestoreFiles.required(job,"jobId")+" stopped while extracting ("+current+"), and server-root is not the directory it recorded. Inspect/recover this job while stopped.");
+        } else if(!RestoreJobState.waiting(current) && !Set.of("EXPIRED","FAILED_BEFORE_SWAP","CANCELLED").contains(current))
             throw new IOException("Unresolved offline restore "+RestoreFiles.required(job,"jobId")+" ("+current+"). Inspect/recover this job while stopped.");
         if(current.equals("CANCELLED") && !RestoreJobState.hasCancellation(dir))throw new IOException("Cancelled status has no authenticated cancellation tombstone");
         // A status string alone cannot prove that the original root was not moved.
@@ -213,7 +238,7 @@ public final class RestoreCoordinator {
         }
         Path stage=boundSibling(job,"stage");
         if(Files.exists(stage,RestoreFiles.NOFOLLOW)) {
-            if(!current.equals("FAILED_BEFORE_SWAP") && !(current.equals("CANCELLED") && RestoreJobState.acknowledged(dir,job)))
+            if(!interrupted && !current.equals("FAILED_BEFORE_SWAP") && !(current.equals("CANCELLED") && RestoreJobState.acknowledged(dir,job)))
                 throw new IOException("Unexpected staged tree for waiting restore: "+stage);
             RestoreFiles.directory(stage,false);
         }
@@ -232,7 +257,20 @@ public final class RestoreCoordinator {
             try {RestoreJobState.acknowledgeCancellation(dir,job,"CONFIRMED_HELPER_DEATH");}
             catch(IOException e) {if(!RestoreJobState.acknowledged(dir,job))throw e;}
         }
+        // From here on the job can never be applied. What it extracted is of no use and may be what filled the disk.
+        if(discardStageWhenResolved)discardStage(job);
         clearActive(id);return true;
+    }
+    /** Best effort. Only ever the job-bound sibling directory that the helper extracted into. */
+    private void discardStage(Properties job) {
+        try {
+            Path stage=boundSibling(job,"stage");
+            if(!Files.exists(stage,RestoreFiles.NOFOLLOW))return;
+            RestoreFiles.directory(stage,false);RestoreFiles.deleteTree(stage);
+            logger.accept("[restore] Removed the unused extraction of restore job "+job.getProperty("jobId")+": "+stage);
+        } catch(IOException | RuntimeException kept) {
+            logger.accept("[restore] The unused extraction of restore job "+job.getProperty("jobId")+" could not be removed ("+RestoreFiles.reason(kept)+"). It can be deleted by hand.");
+        }
     }
     public Reservation reserve(String backupId,Path archive,String expectedSha256,Duration ttl)throws IOException {
         if(backupId==null || !backupId.matches("[A-Za-z0-9._-]{1,160}"))throw new IOException("Invalid backup identifier");
@@ -321,9 +359,12 @@ public final class RestoreCoordinator {
             try(RestoreJobState.Gate gate=RestoreJobState.requireLock(dir)) {
                 ProcessBuilder builder=new ProcessBuilder(java.toString(),"-jar",helperJar.toString(),"--job",dir.resolve("job.properties").toString())
                         .directory(state.toFile()).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.appendTo(dir.resolve("helper.log").toFile()));
-                // Archive names are UTF-8. A helper that inherited a non-UTF-8 locale from this server
-                // could not create files with non-ASCII names. Where the locale does not exist, nothing changes.
-                if(!"UTF-8".equalsIgnoreCase(System.getProperty("sun.jnu.encoding","")) && !System.getProperty("os.name","").toLowerCase(Locale.ROOT).contains("win"))
+                // The helper creates the archive's names in the file-name encoding it inherits from this
+                // server, which is the one the server will look the files up with afterwards (a server
+                // running with EUC-JP gets EUC-JP names back). Only a server without any encoding, the
+                // C/POSIX locale, could not name a non-ASCII file at all; its helper is given a UTF-8
+                // locale. Where that locale does not exist, nothing changes.
+                if(asciiOnlyFileNames() && !System.getProperty("os.name","").toLowerCase(Locale.ROOT).contains("win"))
                     builder.environment().put("LC_ALL","C.UTF-8");
                 process=builder.start();
                 processes.put(id,process);RestoreJobState.recordProcess(dir,job,process.toHandle());
@@ -336,6 +377,10 @@ public final class RestoreCoordinator {
             }
             return failedHandshake(id,process,"Helper did not acknowledge readiness");
         }catch(IOException | RuntimeException e){return failedHandshake(id,process,RestoreFiles.reason(e));}
+    }
+    private static boolean asciiOnlyFileNames() {
+        try{return java.nio.charset.Charset.forName(System.getProperty("sun.jnu.encoding","")).equals(java.nio.charset.StandardCharsets.US_ASCII);}
+        catch(RuntimeException unknownEncoding){return false;}
     }
     private LaunchResult launchResult(String id)throws IOException {
         Path dir=jobDirectory(id);String current=RestoreFiles.status(dir);

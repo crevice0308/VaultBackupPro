@@ -23,7 +23,17 @@ public final class RestoreStartupTest {
             }
             return;
         }
-        if(args[0].equals("--sleep")) {Thread.sleep(60000);return;}
+        if(args[0].equals("--sleep")) {
+            // With a job directory: a helper that is alive and does nothing. It holds helper.lock like every real helper.
+            if(args.length>1) {
+                Path dir=Path.of(args[1]);
+                try(FileChannel c=RestoreFiles.openLockFile(dir.resolve("helper.lock"));FileLock lock=c.lock()) {
+                    Files.createFile(dir.resolve("helper-held"));Thread.sleep(60000);
+                }
+                return;
+            }
+            Thread.sleep(60000);return;
+        }
         if(args[0].equals("--hold-guard")) {
             try(FileChannel c=FileChannel.open(Path.of(args[1]),StandardOpenOption.CREATE,StandardOpenOption.WRITE);FileLock lock=c.lock()) {
                 Files.createFile(Path.of(args[2]));Thread.sleep(60000);
@@ -32,6 +42,7 @@ public final class RestoreStartupTest {
         }
         if(args[0].equals("--cooperate")) {
             Path dir=Path.of(args[1]);Properties job=RestoreFiles.load(dir.resolve("job.properties"));
+            FileChannel helperLock=RestoreFiles.openLockFile(dir.resolve("helper.lock"));helperLock.lock(); // held until this process exits
             try(RestoreJobState.Gate gate=RestoreJobState.requireLock(dir)) {RestoreJobState.recordProcess(dir,job,ProcessHandle.current());}
             Files.createFile(dir.resolve("cooperator-ready"));
             while(true) {
@@ -68,6 +79,9 @@ public final class RestoreStartupTest {
         rollbackIdentity(base.resolve("rollback-identity"));successWithoutRollback(base.resolve("success-receipt"));
         reservationPreflight(base.resolve("preflight"));failedStagingCleansUp(base.resolve("staging-cleanup"));
         fileNameEncoding(base.resolve("file-names"));
+        interruptedExtraction(base.resolve("interrupted"));identityAcrossReboots(base.resolve("device-numbers"));
+        markerTimeAndForm(base.resolve("marker-form"));recoveryWithoutBackupStorage(base.resolve("no-storage"));
+        serverRecognisedAsParent(base.resolve("clock-step"));
         System.out.println("RestoreStartupTest: "+checks+" checks passed; disposable fixtures at "+base);
     }
     private static Fixture fixture(Path base,String status)throws Exception {
@@ -122,10 +136,26 @@ public final class RestoreStartupTest {
             check(result.coordinator().status().orElseThrow().state().equals("GUARDED_DEGRADED"),"degraded status cannot silently clear journal");unchanged(f);guardHeld(f);
         } finally {kill(p);}
     }
+    /**
+     * The server died between publishing a reservation and recording its helper. Nothing identifies a
+     * helper process then, and this used to disable the plugin on every start. Whether a helper is
+     * alive is not presumed either way: every helper holds helper.lock, so a free lock is the witness.
+     */
     private static void missingIdentity(Path base)throws Exception {
         Fixture f=fixture(base,"COMMITTED");var result=start(f);
-        check(result.disposition()==RestoreCoordinator.StartupDisposition.GUARDED_DEGRADED,"missing helper identity is never presumed unlaunched or dead");
-        check(!Files.exists(f.dir.resolve("cancel-ack.properties")) && Files.exists(f.state.resolve("active-restore.properties")),"unknown helper retains journal without false acknowledgment");guardHeld(f);
+        check(result.disposition()==RestoreCoordinator.StartupDisposition.READY,"a reservation whose helper was never recorded resolves when no helper holds its lock");
+        check(RestoreFiles.load(f.dir.resolve("cancel-ack.properties")).getProperty("source").equals("CONFIRMED_HELPER_DEATH") && !Files.exists(f.state.resolve("active-restore.properties")),
+                "it is cancelled durably, never claimed to be unlaunched");
+        unchanged(f);guardHeld(f);
+        Process late=helper(f);check(late.waitFor(10,TimeUnit.SECONDS) && late.exitValue()==3,"a helper that appears afterwards finds the cancellation and does nothing");
+        // A helper that is alive but has not recorded itself yet holds the lock: nothing is presumed about it.
+        Fixture starting=fixture(base.resolve("starting"),"COMMITTED");
+        Process unrecorded=spawn("--sleep",starting.dir.toString());
+        try {
+            await(starting.dir.resolve("helper-held"));var held=start(starting);
+            check(held.disposition()==RestoreCoordinator.StartupDisposition.GUARDED_DEGRADED,"a live helper without a recorded identity is never presumed dead");
+            check(!Files.exists(starting.dir.resolve("cancel-ack.properties")) && Files.exists(starting.state.resolve("active-restore.properties")),"its journal is retained without a false acknowledgment");guardHeld(starting);
+        } finally {kill(unrecorded);}
     }
     private static void malformedJournals(Path base)throws Exception {
         Fixture missing=fixture(base.resolve("missing-status"),"COMMITTED");Files.delete(missing.dir.resolve("status.properties"));hard(start(missing),missing,"missing status is hard conflict, never default COMMITTED");
@@ -157,7 +187,9 @@ public final class RestoreStartupTest {
         check(Files.exists(acknowledgment.state.resolve("active-restore.properties")),"failed acknowledgment retains active journal");guardHeld(acknowledgment);
     }
     private static void retainedLease(Path base)throws Exception {
-        Fixture f=fixture(base,"WAITING_FOR_MANUAL_STOP");Process server=spawn("--hold-degraded",base.toString(),helper.toString());
+        // Degraded: a helper that is alive (it holds its lock) but does not answer the cancellation.
+        Fixture f=fixture(base,"WAITING_FOR_MANUAL_STOP");Process silent=sleeper(f);
+        Process server=spawn("--hold-degraded",base.toString(),helper.toString());
         try {
             await(base.resolve("degraded-ready"));guardHeld(f);
             Files.createFile(base.resolve("exit-request"));await(base.resolve("shutdown-hook"));
@@ -167,7 +199,7 @@ public final class RestoreStartupTest {
                 check(lock!=null,"root guard becomes available only after real JVM exit");
             }
             unchanged(f);
-        } finally {kill(server);}
+        } finally {kill(server);kill(silent);}
     }
     private static void loggerRouting(Path base)throws Exception {
         Fixture f=fixture(base,"COMMITTED");Files.delete(f.state.resolve("active-restore.properties"));
@@ -215,9 +247,10 @@ public final class RestoreStartupTest {
             RestoreJobState.requestCancellation(f.dir,f.job);RestoreJobState.acknowledgeCancellation(f.dir,f.job,"HELPER");
         }
         String cancelId=RestoreFiles.load(f.dir.resolve("cancel.properties")).getProperty("cancelId");
-        var result=start(f);check(result.disposition()==RestoreCoordinator.StartupDisposition.READY,"retained stage and durable cancellation survive interruption before active cleanup");
+        var result=start(f);check(result.disposition()==RestoreCoordinator.StartupDisposition.READY,"a durable cancellation survives an interruption before the active marker was cleared");
         check(cancelId.equals(RestoreFiles.load(f.dir.resolve("cancel.properties")).getProperty("cancelId")),"startup does not replace existing permanent tombstone");
-        check(!Files.exists(f.state.resolve("active-restore.properties")) && Files.isDirectory(Path.of(f.job.getProperty("stage"))),"acknowledged cleanup preserves staged evidence");
+        // Since 1.3.0: a job that can never be applied leaves no extraction behind (it may be what filled the disk).
+        check(!Files.exists(f.state.resolve("active-restore.properties")) && !Files.exists(Path.of(f.job.getProperty("stage"))),"the unused extraction of an acknowledged cancellation is removed with the reservation");
     }
     private static void ordinaryStorageFailure(Path base)throws Exception {
         Fixture f=fixture(base.resolve("backup-file"),"COMMITTED");Files.delete(f.state.resolve("active-restore.properties"));
@@ -234,10 +267,21 @@ public final class RestoreStartupTest {
         check(RestoreJobState.acknowledged(stale.dir,stale.job),"missing backup storage never bypasses cancellation acknowledgment");guardHeld(stale);
     }
     private static void unauthenticatedHelper(Path base)throws Exception {
-        Fixture f=fixture(base,"WAITING_FOR_MANUAL_STOP");Process p=sleeper(f);kill(p);
-        Properties process=RestoreFiles.load(f.dir.resolve("helper-process.properties"));process.setProperty("authentication","0".repeat(64));RestoreFiles.write(f.dir.resolve("helper-process.properties"),process);
-        var result=start(f);check(result.disposition()==RestoreCoordinator.StartupDisposition.GUARDED_DEGRADED,"forged helper identity cannot authorize cancellation acknowledgment");
-        check(!Files.exists(f.dir.resolve("cancel-ack.properties")) && Files.exists(f.state.resolve("active-restore.properties")),"forged helper identity keeps journal and never asserts exact death");guardHeld(f);
+        // Whether a helper is alive is witnessed by its lock, which nobody can write into a file. A record
+        // of its process that fails authentication therefore neither proves a live helper dead ...
+        Fixture f=fixture(base,"WAITING_FOR_MANUAL_STOP");Process p=sleeper(f);
+        try {
+            Properties process=RestoreFiles.load(f.dir.resolve("helper-process.properties"));process.setProperty("authentication","0".repeat(64));
+            process.setProperty("pid","1");RestoreFiles.write(f.dir.resolve("helper-process.properties"),process);
+            var result=start(f);check(result.disposition()==RestoreCoordinator.StartupDisposition.GUARDED_DEGRADED,"a forged helper record cannot make a live helper count as dead");
+            check(!Files.exists(f.dir.resolve("cancel-ack.properties")) && Files.exists(f.state.resolve("active-restore.properties")),"the journal is kept and nothing is acknowledged for it");guardHeld(f);
+        } finally {kill(p);}
+        // ... nor keeps the plugin disabled for a helper that is gone.
+        Fixture gone=fixture(base.resolve("gone"),"WAITING_FOR_MANUAL_STOP");Process dead=sleeper(gone);kill(dead);
+        Properties record=RestoreFiles.load(gone.dir.resolve("helper-process.properties"));record.setProperty("authentication","0".repeat(64));RestoreFiles.write(gone.dir.resolve("helper-process.properties"),record);
+        var resolved=start(gone);
+        check(resolved.disposition()==RestoreCoordinator.StartupDisposition.READY && !Files.exists(gone.state.resolve("active-restore.properties")),"a damaged helper record does not block the cancellation of a reservation whose helper is gone");
+        unchanged(gone);guardHeld(gone);
     }
     private static void hard(RestoreCoordinator.StartupResult result,Fixture f,String message)throws Exception {
         check(result.disposition()==RestoreCoordinator.StartupDisposition.HARD_CONFLICT,message);
@@ -472,8 +516,149 @@ public final class RestoreStartupTest {
             } else check(run.exitValue()==0 && restored && RestoreFiles.status(f.dir).equals("SUCCESS"),"a helper with a UTF-8 locale restores the file under its real name");
         }
     }
+    /**
+     * A helper that was killed while it extracted (with the server's terminal, service or container)
+     * left a journal at STAGING. That used to stop the server on every start until a recovery was run
+     * by hand, although the server data had not been touched.
+     */
+    private static void interruptedExtraction(Path base)throws Exception {
+        for(String status:List.of("STAGING","STAGED")) {
+            for(boolean identity:new boolean[]{true,false}) {
+                Fixture f=stopped(base.resolve(status+"-"+identity),status);Path stage=Path.of(f.job.getProperty("stage"));
+                if(identity)RestoreJobState.recordRootIdentity(f.dir,f.job,f.root);
+                Files.createDirectories(stage.resolve("world"));Files.writeString(stage.resolve("world/partial.dat"),"PARTIAL");
+                var result=start(f);
+                check(result.disposition()==RestoreCoordinator.StartupDisposition.READY,"a journal that ends at "+status+" resolves by itself once the helper is gone (identity recorded: "+identity+"): "+result.message());
+                check(result.coordinator().startupFinding()==RestoreCoordinator.StartupFinding.RESTORE_NOT_APPLIED && result.coordinator().startupFailure().orElse("").contains(status),"and is reported as a restore that was not applied");
+                check(!Files.exists(stage) && !Files.exists(f.state.resolve("active-restore.properties")) && result.coordinator().protectedBackupIds().isEmpty(),"the partial extraction is removed and the reservation is gone");
+                unchanged(f);guardHeld(f);
+                Process retry=helper(f);check(retry.waitFor(10,TimeUnit.SECONDS) && retry.exitValue()==3,"the interrupted job can never be resumed");
+            }
+        }
+        // While a helper may still be running, nothing is concluded.
+        Fixture alive=fixture(base.resolve("alive"),"STAGING");Process running=sleeper(alive);
+        try {hard(start(alive),alive,"a journal at STAGING with a live helper is not resolved by the server");}
+        finally {kill(running);}
+        // The directory in place is not the one the helper recorded: not resolved either.
+        Fixture replaced=stopped(base.resolve("replaced"),"STAGING");RestoreJobState.recordRootIdentity(replaced.dir,replaced.job,replaced.root);
+        Path aside=replaced.base.resolve("original-moved-aside");Files.move(replaced.root,aside);Files.createDirectory(replaced.root);Files.writeString(replaced.root.resolve("original"),"ORIGINAL");
+        boolean identities=!RestoreFiles.fileIdentity(replaced.root).isEmpty();
+        if(identities)hard(start(replaced),replaced,"a journal at STAGING is not resolved when the server root is another directory than recorded");
+        // A journal past the extraction is never resolved this way.
+        Fixture moving=stopped(base.resolve("moving"),"MOVING_ORIGINAL");
+        hard(start(moving),moving,"a journal at MOVING_ORIGINAL still needs an explicit recovery");
+        // A failed attempt is reported as such too, and leaves no extraction behind.
+        Fixture failed=stopped(base.resolve("failed"),"FAILED_BEFORE_SWAP");Path leftover=Path.of(failed.job.getProperty("stage"));
+        Files.createDirectory(leftover);Files.writeString(leftover.resolve("x"),"x");
+        var afterFailure=start(failed);
+        check(afterFailure.disposition()==RestoreCoordinator.StartupDisposition.READY && afterFailure.coordinator().startupFinding()==RestoreCoordinator.StartupFinding.RESTORE_NOT_APPLIED && !Files.exists(leftover),
+                "a restore that failed before the swap is reported as not applied, and its extraction is removed");
+        // A reservation that never got as far as an attempt keeps its own wording.
+        Fixture waiting=stopped(base.resolve("waiting"),"WAITING_FOR_MANUAL_STOP");
+        check(start(waiting).coordinator().startupFinding()==RestoreCoordinator.StartupFinding.STALE_RESERVATION_CANCELLED,"a reservation that was never attempted is a cancelled reservation");
+    }
+    /**
+     * A device number belongs to a boot, not to a filesystem: LVM, btrfs, ZFS and NFS volumes may get
+     * another one after a restart. The identity of the original root must survive that, or a server
+     * that lost power in the middle of a swap could not be recovered.
+     */
+    private static void identityAcrossReboots(Path base)throws Exception {
+        check(Boolean.TRUE.equals(RestoreFiles.sameFile("(dev=803,ino=42)","(dev=803,ino=42)")),"the same device and inode is the same file");
+        check(Boolean.FALSE.equals(RestoreFiles.sameFile("(dev=803,ino=42)","(dev=803,ino=43)")),"another inode on the same device is another file");
+        check(RestoreFiles.sameFile("(dev=803,ino=42)","(dev=fd01,ino=42)")==null,"the same inode under another device number proves nothing");
+        check(RestoreFiles.sameFile("(dev=803,ino=42)","(dev=fd01,ino=43)")==null,"neither does another inode under another device number");
+        check(RestoreFiles.sameFile("","(dev=803,ino=42)")==null && RestoreFiles.sameFile("(dev=803,ino=42)","")==null && RestoreFiles.sameFile("something","else")==null,"missing or unknown identities prove nothing");
+        Fixture probe=fixture(base.resolve("probe"),"COMMITTED");
+        java.util.regex.Matcher key=java.util.regex.Pattern.compile("\\(dev=([0-9a-f]+),ino=([0-9]+)\\)").matcher(RestoreFiles.fileIdentity(probe.root));
+        if(!key.matches())return; // This platform has other identities, or none.
+        // The interrupted swap, as found after a restart that renumbered the device.
+        Fixture renumbered=stopped(base.resolve("renumbered"),"VERIFYING_INSTALLED");Path rollback=Path.of(renumbered.job.getProperty("rollback"));
+        Files.move(renumbered.root,rollback);Files.createDirectory(renumbered.root);Files.writeString(renumbered.root.resolve("restored"),"UNVERIFIED");
+        java.util.regex.Matcher moved=java.util.regex.Pattern.compile("\\(dev=([0-9a-f]+),ino=([0-9]+)\\)").matcher(RestoreFiles.fileIdentity(rollback));check(moved.matches(),"fixture identity");
+        identity(renumbered,"(dev="+Long.toHexString(Long.parseLong(moved.group(1),16)+7)+",ino="+moved.group(2)+")");
+        check(RestoreJobState.isOriginalRoot(renumbered.dir,renumbered.job,rollback)==RestoreJobState.Original.UNKNOWN,"a renumbered device leaves the identity undecided");
+        Process recover=helper(renumbered,Map.of(),"--recover","--i-confirm-server-stopped");
+        check(recover.waitFor(20,TimeUnit.SECONDS) && recover.exitValue()==0 && Files.readString(renumbered.root.resolve("original")).equals("ORIGINAL"),"the original root is recovered after a restart that renumbered its device");
+        // Another inode on the same device: refused, without advice to delete anything, and with a way on for the operator.
+        Fixture other=stopped(base.resolve("other-inode"),"VERIFYING_INSTALLED");Path otherRollback=Path.of(other.job.getProperty("rollback"));
+        Files.move(other.root,otherRollback);Files.createDirectory(other.root);Files.writeString(other.root.resolve("restored"),"UNVERIFIED");
+        moved.reset(RestoreFiles.fileIdentity(otherRollback));check(moved.matches(),"fixture identity");
+        identity(other,"(dev="+moved.group(1)+",ino="+(Long.parseLong(moved.group(2))+1)+")");
+        java.io.ByteArrayOutputStream said=new java.io.ByteArrayOutputStream();
+        Process refused=new ProcessBuilder(java(),"-jar",helper.toString(),"--job",other.dir.resolve("job.properties").toString(),"--recover","--i-confirm-server-stopped").redirectErrorStream(true).start();
+        refused.getInputStream().transferTo(said);
+        String output=said.toString(StandardCharsets.UTF_8);
+        check(refused.waitFor(20,TimeUnit.SECONDS) && refused.exitValue()==2 && Files.readString(otherRollback.resolve("original")).equals("ORIGINAL") && Files.readString(other.root.resolve("restored")).equals("UNVERIFIED"),
+                "a rollback directory with another identity is not moved");
+        check(output.contains("--accept-rollback-directory") && !output.toLowerCase(Locale.ROOT).contains("remove"),"the refusal names the way on and never suggests removing the directory: "+output);
+        Process misuse=helper(other,Map.of(),"--manual","--i-confirm-server-stopped","--accept-rollback-directory");
+        check(misuse.waitFor(20,TimeUnit.SECONDS) && misuse.exitValue()==2,"the override is only accepted for a recovery");
+        Process accepted=helper(other,Map.of(),"--recover","--i-confirm-server-stopped","--accept-rollback-directory");
+        check(accepted.waitFor(20,TimeUnit.SECONDS) && accepted.exitValue()==0 && Files.readString(other.root.resolve("original")).equals("ORIGINAL")
+                && Files.readString(Path.of(other.job.getProperty("failed")).resolve("restored")).equals("UNVERIFIED"),"the operator can overrule the identity after looking at the directory");
+    }
+    private static void identity(Fixture f,String root)throws Exception {
+        Properties p=new Properties();p.setProperty("jobId",f.job.getProperty("jobId"));p.setProperty("root",root);
+        p.setProperty("authentication",RestoreFiles.hmac(f.job.getProperty("nonce"),String.join("\n",p.getProperty("jobId"),root)));
+        RestoreFiles.write(f.dir.resolve("root-identity.properties"),p);
+    }
+    private static void markerTimeAndForm(Path base)throws Exception {
+        Fixture f=fixture(base,"WAITING_FOR_MANUAL_STOP");Path marker=f.dir.resolve("normal-stop.properties");
+        RestoreJobState.noteNormalShutdown(f.dir,f.job,RestoreJobState.EVIDENCE_PLUGIN_DISABLED);
+        Instant written=Instant.parse(RestoreFiles.load(marker).getProperty("requestedAt"));
+        // The system clock was set back while the server kept running without the plugin: by the clock the
+        // marker looks a minute old, by the helper's own measurement it is hours old.
+        RestoreJobState.requireNormalShutdown(f.dir,f.job,written.plusSeconds(60),Duration.ofSeconds(60));checks++;
+        refuses(()->RestoreJobState.requireNormalShutdown(f.dir,f.job,written.plusSeconds(60),Duration.ofHours(4)),"a marker the helper has been looking at for hours is old, whatever the system clock says");
+        refuses(()->RestoreJobState.requireNormalShutdown(f.dir,f.job,written.plusSeconds(60),RestoreJobState.DISABLED_EXIT_GRACE.plusSeconds(1)),"the helper's own measurement has the same limit");
+        RestoreJobState.requireNormalShutdown(f.dir,f.job,written.plusSeconds(60),RestoreJobState.DISABLED_EXIT_GRACE);checks++;
+        RestoreJobState.noteNormalShutdown(f.dir,f.job,RestoreJobState.EVIDENCE_SERVER_STOPPING);
+        RestoreJobState.requireNormalShutdown(f.dir,f.job,Instant.now(),Duration.ofDays(3));checks++; // a server that said it was stopping has no limit
+        // One marker must not be readable as another. The fields are joined by line breaks when they are
+        // authenticated, so a "time" with a line break in it would carry the evidence of a weaker marker.
+        RestoreJobState.noteNormalShutdown(f.dir,f.job,RestoreJobState.EVIDENCE_PLUGIN_DISABLED);
+        Properties weak=RestoreFiles.load(marker),disguised=new Properties();
+        for(String key:List.of("jobId","parentPid","parentStartedAt","authentication"))disguised.setProperty(key,weak.getProperty(key));
+        disguised.setProperty("requestedAt",weak.getProperty("requestedAt")+"\nPLUGIN_DISABLED");
+        RestoreFiles.write(marker,disguised);
+        refuses(()->RestoreJobState.requireNormalShutdown(f.dir,f.job,Instant.now().plus(Duration.ofDays(1))),"a marker whose time is not a time is refused, although its authentication code matches");
+    }
+    /** Putting the original data back needs no backup. The storage may be an unmounted disk at that moment. */
+    private static void recoveryWithoutBackupStorage(Path base)throws Exception {
+        Fixture f=stopped(base,"RECOVERY_REQUIRED");RestoreJobState.recordRootIdentity(f.dir,f.job,f.root);
+        Files.move(f.root,Path.of(f.job.getProperty("rollback")));Files.move(f.backups,f.base.resolve("unmounted"));
+        Process recover=helper(f,Map.of(),"--recover","--i-confirm-server-stopped");
+        check(recover.waitFor(20,TimeUnit.SECONDS) && recover.exitValue()==0 && Files.readString(f.root.resolve("original")).equals("ORIGINAL"),"recovery works while the backup storage is absent");
+        Fixture apply=stopped(base.resolve("apply"),"WAITING_FOR_MANUAL_STOP");Files.move(apply.backups,apply.base.resolve("unmounted"));
+        Process manual=helper(apply);
+        check(manual.waitFor(20,TimeUnit.SECONDS) && manual.exitValue()==2 && Files.readString(apply.root.resolve("original")).equals("ORIGINAL"),"applying a restore still requires the storage");
+    }
+    /**
+     * The start time of a process is computed from the system clock. When the clock is set after the
+     * server started (a host without a battery-backed clock that reaches its time server late), the
+     * helper computes another start time than the server recorded for itself, and used to conclude
+     * that the server was gone. A helper started by the server knows its parent without any clock.
+     */
+    private static void serverRecognisedAsParent(Path base)throws Exception {
+        Fixture f=fixture(base,"COMMITTED");
+        f.job.setProperty("parentStartedAt",ProcessHandle.current().info().startInstant().orElseThrow().minus(Duration.ofHours(3)).toString());
+        RestoreFiles.write(f.dir.resolve("job.properties"),f.job);
+        Process automatic=helper(f,Map.of());
+        try {
+            long deadline=System.nanoTime()+Duration.ofSeconds(20).toNanos();
+            while(!RestoreFiles.status(f.dir).equals("WAITING_FOR_MANUAL_STOP")) {
+                if(!automatic.isAlive() || System.nanoTime()>deadline)throw new AssertionError("a helper started by the server did not recognise it as its parent after a clock change; status "+RestoreFiles.status(f.dir));
+                Thread.sleep(20);
+            }
+            checks++;
+            Thread.sleep(600);check(automatic.isAlive() && RestoreFiles.status(f.dir).equals("WAITING_FOR_MANUAL_STOP"),"and keeps waiting while that parent runs");
+            try(RestoreJobState.Gate gate=RestoreJobState.requireLock(f.dir)) {RestoreJobState.requestCancellation(f.dir,f.job);}
+            check(automatic.waitFor(10,TimeUnit.SECONDS) && automatic.exitValue()==3 && RestoreJobState.acknowledged(f.dir,f.job),"it still honours a cancellation");
+        } finally {kill(automatic);}
+        unchanged(f);
+    }
     private static Process sleeper(Fixture f)throws Exception {
-        Process p=spawn("--sleep");RestoreJobState.recordProcess(f.dir,f.job,p.toHandle());return p;
+        Process p=spawn("--sleep",f.dir.toString());await(f.dir.resolve("helper-held"));RestoreJobState.recordProcess(f.dir,f.job,p.toHandle());return p;
     }
     private static void kill(Process p)throws Exception {if(p.isAlive()) {p.destroyForcibly();p.waitFor(10,TimeUnit.SECONDS);}}
     private static Process spawn(String...args)throws IOException {

@@ -4,6 +4,7 @@ package com.vaultbackup.restore;
 import java.io.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.security.*;
@@ -241,6 +242,40 @@ final class RestoreFiles {
     static String fileIdentity(Path path) throws IOException {
         Object key = Files.readAttributes(path, BasicFileAttributes.class, NOFOLLOW).fileKey();
         return key == null ? "" : key.toString();
+    }
+    private static final java.util.regex.Pattern DEVICE_AND_INODE = java.util.regex.Pattern.compile("\\(dev=([0-9a-fA-F]+),ino=([0-9]+)\\)");
+    /**
+     * Whether two identities, possibly taken before and after a reboot, name the same file: TRUE,
+     * FALSE, or null when that cannot be said. Device numbers are handed out again at every boot and
+     * may then differ for the same filesystem (LVM, btrfs, ZFS, NFS), so another device proves
+     * nothing in either direction. Another inode number on the same device is another file.
+     */
+    static Boolean sameFile(String recorded, String actual) {
+        if (recorded == null || actual == null || recorded.isEmpty() || actual.isEmpty()) return null;
+        if (recorded.equals(actual)) return Boolean.TRUE;
+        java.util.regex.Matcher a = DEVICE_AND_INODE.matcher(recorded), b = DEVICE_AND_INODE.matcher(actual);
+        if (!a.matches() || !b.matches()) return null;
+        boolean sameDevice = a.group(1).equalsIgnoreCase(b.group(1)), sameInode = a.group(2).equals(b.group(2));
+        return sameDevice && !sameInode ? Boolean.FALSE : null;
+    }
+    /**
+     * Whether any process holds a lock on the file right now: TRUE when none does (or the file does
+     * not exist), FALSE when one does, null when this filesystem cannot tell. The operating system
+     * releases a lock with the process that held it, so this is a better witness of a process being
+     * gone than a process ID, which is reused.
+     */
+    static Boolean unlocked(Path file) {
+        if (!Files.exists(file, NOFOLLOW)) return Boolean.TRUE;
+        try (FileChannel channel = FileChannel.open(file, Set.of(StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS))) {
+            FileLock lock = channel.tryLock();
+            if (lock == null) return Boolean.FALSE;
+            lock.release();
+            return Boolean.TRUE;
+        } catch (java.nio.channels.OverlappingFileLockException heldByThisJvm) {
+            return Boolean.FALSE;
+        } catch (IOException | UnsupportedOperationException unknown) {
+            return null;
+        }
     }
 
     /** Free space the filesystem of the directory must have beyond the bytes to be written there. */
