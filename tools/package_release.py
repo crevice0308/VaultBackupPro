@@ -107,6 +107,13 @@ def main():
     # nothing untracked may be published through it.
     names = public_files()
     tracked = tracked_files()
+    # The workflow that publishes this version is in the repository for one commit only: it is added
+    # for the release and removed right afterwards. It is tracked then, but it is not published.
+    publisher = f'.github/workflows/publish-v{version}.yml'
+    if publisher in names:
+        fail(f'{publisher} is a one-time publication step and must not be listed in release/PUBLIC-FILES.txt')
+    if tracked is not None:
+        tracked = [name for name in tracked if name != publisher]
     if tracked is not None and sorted(names) != tracked:
         unlisted = sorted(set(tracked) - set(names)) or ['-']
         untracked = sorted(set(names) - set(tracked)) or ['-']

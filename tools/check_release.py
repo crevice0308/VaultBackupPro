@@ -159,7 +159,7 @@ public final class VerifyRelease {{
         }}
         Method main=Class.forName({java_string(RESTORE_MAIN)},false,loader).getDeclaredMethod("main",String[].class);
         check(main.getReturnType()==void.class && Modifier.isPublic(main.getModifiers()) && Modifier.isStatic(main.getModifiers()),"helper main");
-        recordRoundTrip("com.vaultbackup.core.BackupRecord","probe",Instant.EPOCH,"label",Path.of("archive.zip"),Path.of("metadata.properties"),1L,2L,1,"digest",0);
+        recordRoundTrip("com.vaultbackup.core.BackupRecord","probe",Instant.EPOCH,"label",Path.of("archive.zip"),Path.of("metadata.properties"),1L,2L,1,"digest",0,0);
         recordRoundTrip("com.vaultbackup.restore.RestoreArchive$Entry","world/probe.dat",false,2L,"digest");
         {plugin_checks}
         System.out.println("VERIFIED classes="+names.length+" records="+records+" enums="+enums);
