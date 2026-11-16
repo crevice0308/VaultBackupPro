@@ -111,6 +111,22 @@ public final class RestoreCoordinator {
             return Files.exists(state.resolve("active-restore.properties"),RestoreFiles.NOFOLLOW);
         } catch(RuntimeException unknown) {return true;}
     }
+    /**
+     * Whether a restore journal in the state directory may concern this server root. False only when
+     * there is none, or when the active job provably names another existing directory (a state
+     * directory that a second server uses as well). True whenever that cannot be determined.
+     */
+    public static boolean journalMayConcern(Path stateDirectory,Path serverRoot) {
+        if(!journalMayExist(stateDirectory))return false;
+        try {
+            Path state=stateDirectory.toAbsolutePath().normalize(),root=serverRoot.toAbsolutePath().normalize();
+            String id=RestoreFiles.required(RestoreFiles.load(state.resolve("active-restore.properties")),"jobId");
+            if(!id.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"))return true;
+            Path bound=Path.of(RestoreFiles.required(RestoreFiles.load(state.resolve("restore-jobs").resolve(id).resolve("job.properties")),"serverRoot"));
+            if(bound.equals(root))return true;
+            return !(Files.isDirectory(bound) && Files.isDirectory(root) && !Files.isSameFile(bound,root));
+        } catch(IOException | RuntimeException unknown) {return true;}
+    }
     public RestoreCoordinator(Path serverRoot, Path backupDirectory, Path stateDirectory, Path helperJar)throws IOException {
         this(serverRoot,backupDirectory,stateDirectory,helperJar,"en");
     }

@@ -34,9 +34,11 @@ public record PluginSettings(Path serverRoot, Path backupDirectory, Path stateDi
         // HARD_CONFLICT. Never create or resolve away an unsafe root during config parsing.
         // A filesystem root can never be restored, though: that is purely a configuration error.
         if (root.getParent() == null) throw invalid(y, "settings.rootparent");
-        Path backup = resolve(y, root, requiredString(y, "storage.backup-directory", "../VaultBackup-backups"));
-        Path state = resolve(y, root, requiredString(y, "storage.state-directory", "../VaultBackup-state"));
-        Path helper = resolve(y, root, requiredString(y, "restore.helper-jar", "../VaultBackup-state/helper/vaultbackup-restore.jar"));
+        // {server} stands for the name of the server-root folder. The shipped configuration uses it so
+        // that servers side by side in one folder do not end up with the same backup and state directory.
+        Path backup = resolve(y, root, requiredString(y, "storage.backup-directory", "../VaultBackup-{server}-backups"));
+        Path state = resolve(y, root, requiredString(y, "storage.state-directory", "../VaultBackup-{server}-state"));
+        Path helper = resolve(y, root, requiredString(y, "restore.helper-jar", "../VaultBackup-{server}-state/helper/vaultbackup-restore.jar"));
         // Reject ancestors here too. Otherwise the restore guard refuses them later as a
         // startup conflict, which stops the whole server on every start instead of this plugin.
         if (backup.startsWith(root) || state.startsWith(root) || root.startsWith(backup) || root.startsWith(state))
@@ -93,8 +95,9 @@ public record PluginSettings(Path serverRoot, Path backupDirectory, Path stateDi
         return new IllegalArgumentException(Messages.text(y.getString("language", Messages.DEFAULT_LANGUAGE), key, arguments));
     }
 
+    static final String SERVER_PLACEHOLDER = "{server}";
     private static Path resolve(YamlConfiguration y, Path root, String value) throws IOException {
-        Path p = root.resolve(value).toAbsolutePath().normalize();
+        Path p = root.resolve(value.replace(SERVER_PLACEHOLDER, root.getFileName().toString())).toAbsolutePath().normalize();
         // Resolve every existing ancestor, preventing a not-yet-created child under a symlink from bypassing containment.
         Path existing = p;
         while (existing != null && !Files.exists(existing)) existing = existing.getParent();

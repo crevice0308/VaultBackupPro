@@ -54,6 +54,24 @@ public final class PluginSettingsTest {
   for(String older:List.of("1.21.11","26.1","26.1.2")){if(BukkitPlatform.compareVersions(older,minimum)>=0)throw new AssertionError(older+" must be below the minimum");checks++;}
   for(String ok:List.of("26.2","26.2.0","26.2.1","26.3","26.4","27.1")){if(BukkitPlatform.compareVersions(ok,minimum)<0)throw new AssertionError(ok+" must satisfy the minimum");checks++;}
   if(BukkitPlatform.compareVersions("26.3.0",verified)!=0||BukkitPlatform.compareVersions("26.4",verified)<=0||BukkitPlatform.compareVersions("26.10","26.9")<=0)throw new AssertionError("numeric version order");checks++;
+  // The shipped storage paths, untouched: two servers side by side in one folder get directories of their own.
+  // (Up to 1.2.1 both got ../VaultBackup-backups and deleted each other's backups through retention.)
+  Path network=Files.createDirectory(base.resolve("network")),lobby=Files.createDirectory(network.resolve("lobby")),survival=Files.createDirectory(network.resolve("survival"));
+  YamlConfiguration shipped=new YamlConfiguration();shipped.loadFromString(template);
+  shipped.set("storage.server-root",lobby.toString());var lobbySettings=PluginSettings.from(shipped);
+  shipped.set("storage.server-root",survival.toString());var survivalSettings=PluginSettings.from(shipped);
+  if(!lobbySettings.backupDirectory().equals(network.toRealPath().resolve("VaultBackup-lobby-backups"))||!lobbySettings.stateDirectory().equals(network.toRealPath().resolve("VaultBackup-lobby-state"))
+    ||!lobbySettings.helperJar().equals(network.toRealPath().resolve("VaultBackup-lobby-state/helper/vaultbackup-restore.jar")))throw new AssertionError("shipped storage paths carry the server's folder name: "+lobbySettings);checks++;
+  if(lobbySettings.backupDirectory().equals(survivalSettings.backupDirectory())||lobbySettings.stateDirectory().equals(survivalSettings.stateDirectory())||lobbySettings.helperJar().equals(survivalSettings.helperJar()))
+   throw new AssertionError("two servers in one folder share storage with the shipped configuration");checks++;
+  // A configuration written by an earlier version keeps exactly the directories it names.
+  shipped.set("storage.backup-directory","../VaultBackup-backups");shipped.set("storage.state-directory","../VaultBackup-state");shipped.set("restore.helper-jar","../VaultBackup-state/helper/vaultbackup-restore.jar");
+  var earlier=PluginSettings.from(shipped);
+  if(!earlier.backupDirectory().equals(network.toRealPath().resolve("VaultBackup-backups"))||!earlier.stateDirectory().equals(network.toRealPath().resolve("VaultBackup-state")))throw new AssertionError("an existing configuration keeps its directories");checks++;
+  // The placeholder can be used anywhere in a path, and a missing storage key falls back to the per-server name.
+  shipped.set("storage.backup-directory",base.resolve("all-backups/{server}/archives").toString());shipped.set("storage.state-directory",null);shipped.set("restore.helper-jar",null);
+  var placed=PluginSettings.from(shipped);
+  if(!placed.backupDirectory().equals(base.toRealPath().resolve("all-backups/survival/archives"))||!placed.stateDirectory().equals(network.toRealPath().resolve("VaultBackup-survival-state")))throw new AssertionError("{server} placeholder: "+placed);checks++;
   // The automatic interval counts from the newest backup, also across restarts.
   java.time.Instant now=java.time.Instant.parse("2026-11-16T04:00:00Z");java.time.Duration settle=VaultBackupPlugin.AUTOMATIC_SETTLE;
   if(!VaultBackupPlugin.automaticDue(now,null,1440).equals(now.plus(settle)))throw new AssertionError("no backup yet: due once the server has settled");checks++;

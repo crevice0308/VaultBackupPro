@@ -425,6 +425,42 @@ public final class DeleteWorkflowTest {
             Files.writeString(links?realConfig:config,"language: [not, a, language]\n");
             messages.clear();commands.onCommand(sender,null,"backup",new String[]{"reload"});
             check(contains(messages,"Configuration rejected") && plugin.settings().intervalMinutes()==15,"an invalid file is rejected and the active settings stay");
+            // A backup or state directory belongs to one server.
+            var claim=VaultBackupPlugin.class.getDeclaredMethod("claimStorage",Path.class);claim.setAccessible(true);
+            Path shared=Files.createDirectory(fixture.resolve("shared-storage")),ownerFile=shared.resolve(VaultBackupPlugin.OWNER_FILE);
+            PluginSettings ownerSettings=plugin.settings();
+            claim.invoke(plugin,shared);
+            Properties owner=new Properties();try(var in=Files.newInputStream(ownerFile)){owner.load(in);}
+            check(owner.getProperty("serverRoot").equals(ownerSettings.serverRoot().toString()),"the first server to use a directory records its root there");
+            claim.invoke(plugin,shared);checks++; // the same server again: nothing to refuse
+            Path secondRoot=Files.createDirectory(fixture.resolve("second-server"));
+            PluginSettings otherSettings=new PluginSettings(secondRoot,ownerSettings.backupDirectory(),ownerSettings.stateDirectory(),ownerSettings.helperJar(),ownerSettings.includes(),ownerSettings.excludes(),ownerSettings.automatic(),ownerSettings.intervalMinutes(),
+                    ownerSettings.retentionCount(),ownerSettings.retentionBytes(),ownerSettings.compressionLevel(),ownerSettings.maxEntries(),ownerSettings.maxEntryBytes(),ownerSettings.maxTotalBytes(),ownerSettings.maxCompressionRatio(),ownerSettings.confirmationSeconds(),ownerSettings.discordEnabled(),ownerSettings.webhook(),ownerSettings.language());
+            field(plugin,VaultBackupPlugin.class,"settings",otherSettings);
+            try {claim.invoke(plugin,shared);throw new AssertionError("a second server was allowed into another server's storage");}
+            catch(java.lang.reflect.InvocationTargetException refused) {
+                check(refused.getCause() instanceof IOException && refused.getCause().getMessage().contains("used by another server") && refused.getCause().getMessage().contains(ownerSettings.serverRoot().toString()),
+                        "a different server is refused, with the owner named: "+refused.getCause().getMessage());
+            }
+            try(var in=Files.newInputStream(ownerFile)){owner.clear();owner.load(in);}
+            check(owner.getProperty("serverRoot").equals(ownerSettings.serverRoot().toString()),"and the record is left as it was");
+            // The same directory under another spelling is the same server.
+            boolean spelled=true;Path alias=fixture.resolve("alias-of-first");
+            try {Files.createSymbolicLink(alias,ownerSettings.serverRoot());} catch(UnsupportedOperationException | IOException noLinks) {spelled=false;}
+            if(spelled) {
+                field(plugin,VaultBackupPlugin.class,"settings",new PluginSettings(alias,ownerSettings.backupDirectory(),ownerSettings.stateDirectory(),ownerSettings.helperJar(),ownerSettings.includes(),ownerSettings.excludes(),ownerSettings.automatic(),ownerSettings.intervalMinutes(),
+                        ownerSettings.retentionCount(),ownerSettings.retentionBytes(),ownerSettings.compressionLevel(),ownerSettings.maxEntries(),ownerSettings.maxEntryBytes(),ownerSettings.maxTotalBytes(),ownerSettings.maxCompressionRatio(),ownerSettings.confirmationSeconds(),ownerSettings.discordEnabled(),ownerSettings.webhook(),ownerSettings.language()));
+                claim.invoke(plugin,shared);checks++;
+                Files.delete(alias);Files.delete(ownerFile);field(plugin,VaultBackupPlugin.class,"settings",ownerSettings);claim.invoke(plugin,shared);
+            }
+            // The owner was renamed or removed: the directory goes to the server that uses it now.
+            Path gone=fixture.resolve("server-that-was-renamed");
+            owner.setProperty("serverRoot",gone.toString());try(var out=Files.newOutputStream(ownerFile)){owner.store(out,null);}
+            field(plugin,VaultBackupPlugin.class,"settings",otherSettings);claim.invoke(plugin,shared);
+            try(var in=Files.newInputStream(ownerFile)){owner.clear();owner.load(in);}
+            check(owner.getProperty("serverRoot").equals(secondRoot.toString()),"a directory whose owner no longer exists is taken over");
+            check(engine.listBackups().size()>=0 && Files.list(shared).count()==1,"the record is the only file written, and it is not an archive");
+            field(plugin,VaultBackupPlugin.class,"settings",ownerSettings);
             // /backup create typed as a command, against a server model with one world.
             boolean[] autosave={true};UUID worldId=UUID.randomUUID();
             org.bukkit.World world=(org.bukkit.World)Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),new Class<?>[]{org.bukkit.World.class},(p,m,a)->switch(m.getName()) {

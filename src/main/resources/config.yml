@@ -11,10 +11,12 @@ language: ja_JP
 
 # 保存先変更には再起動が必要です。
 # backup-directory と state-directory は server-root の外に、別々に配置してください。
+# {server} は server-root のフォルダー名に置き換わります（同じ親フォルダーに複数のサーバーを置いても重ならないようにするため）。
+# 保存先はサーバーごとに専用にしてください。別のサーバーが使用中の保存先を指定すると、VaultBackup は起動時に自分を無効化します。
 storage:
   server-root: .
-  backup-directory: ../VaultBackup-backups
-  state-directory: ../VaultBackup-state
+  backup-directory: ../VaultBackup-{server}-backups
+  state-directory: ../VaultBackup-{server}-state
 
 backup:
   compression-level: 6
@@ -60,7 +62,7 @@ limits:
 
 restore:
   # 同梱ヘルパーを外部保存先へ設置します。稼働中に復元する代替処理はありません。
-  helper-jar: ../VaultBackup-state/helper/vaultbackup-restore.jar
+  helper-jar: ../VaultBackup-{server}-state/helper/vaultbackup-restore.jar
   # 予約後もサーバーは稼働します。自動再起動を無効化し、手動で停止してください。
   # 復元はサーバー停止処理への到達と JVM 完全終了の両方を確認してから実行します。
   # Paper・Purpur ではサーバーが停止中であることを API で確認します。

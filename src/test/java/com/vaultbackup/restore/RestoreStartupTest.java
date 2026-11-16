@@ -322,6 +322,13 @@ public final class RestoreStartupTest {
         check(fault.disposition()==RestoreCoordinator.StartupDisposition.HARD_CONFLICT && !fault.guardHeldElsewhere(),"a path fault is a conflict without a foreign guard holder");
         check(!RestoreCoordinator.journalMayExist(symlinked.state) && RestoreCoordinator.journalMayExist(fixture(base.resolve("journal"),"COMMITTED").state)
                 && !RestoreCoordinator.journalMayExist(base.resolve("no-such-state")),"whether a restore journal exists can be told without a coordinator");
+        // A state directory that a second server uses as well: its journal names the other server's root,
+        // and is no reason to stop this one.
+        Fixture theirs=fixture(base.resolve("their-journal"),"WAITING_FOR_MANUAL_STOP");Path ours=Files.createDirectory(theirs.base.resolve("our-server"));
+        check(RestoreCoordinator.journalMayConcern(theirs.state,theirs.root) && !RestoreCoordinator.journalMayConcern(theirs.state,ours),"a journal concerns the root it names and no other existing directory");
+        check(RestoreCoordinator.journalMayConcern(theirs.state,theirs.base.resolve("not-there")) && !RestoreCoordinator.journalMayConcern(base.resolve("no-such-state"),ours),"what cannot be compared is assumed to concern the root; no journal concerns nobody");
+        Files.writeString(theirs.state.resolve("active-restore.properties"),"jobId=wrong\nbackupId=snapshot\n");
+        check(RestoreCoordinator.journalMayConcern(theirs.state,ours),"an unreadable journal is assumed to concern the root");
     }
     private static void stopEvidence(Path base)throws Exception {
         Fixture f=fixture(base,"WAITING_FOR_MANUAL_STOP");Path marker=f.dir.resolve("normal-stop.properties");

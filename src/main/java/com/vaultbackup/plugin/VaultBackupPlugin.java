@@ -87,6 +87,13 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
     private boolean restoreGuardStartupFailure;
 
     @Override public void onEnable() {
+        // A plugin manager may enable the same instance again after disabling it.
+        stopping = false; restoreGuardStartupFailure = false;
+        busy.set(false); cancelled.set(false); restorePolling.set(false);
+        operation = "operation.idle"; progress = "Ready";
+        catalogue = List.of(); rejected = Map.of(); catalogueLoaded = false; helperAvailable = false; automaticAnchored = false;
+        restoreStatus = null; restoreStatusUncertain = false; armedJob = null; pendingRestoreCancel = null;
+        automaticTask = null; nextAutomatic = null; automaticIntervalMinutes = 0;
         try {
             saveDefaultConfig();
             settings = PluginSettings.read(getDataFolder().toPath().resolve("config.yml"));
@@ -95,6 +102,10 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             // An absent state directory cannot contain a restore journal or guard, so failing to
             // create it is a configuration problem: disable the plugin, do not stop the server.
             prepareStateDirectory();
+            // Before anything in it is read: a state directory that another server uses holds that
+            // server's restore journal. This plugin then steps aside; it neither stops this server
+            // for a journal that is not its own nor touches it.
+            claimStorage(settings.stateDirectory());
             // Acquire the lifetime root guard before opening the engine or requiring the root.
             restoreGuardStartupFailure = true;
             RestoreCoordinator.StartupResult startup = RestoreCoordinator.start(settings.serverRoot(),
@@ -105,7 +116,7 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
                 // The server is stopped only when its data may be in use by another process or in
                 // the middle of a swap. Paths that merely cannot be used disable the plugin instead.
                 restoreGuardStartupFailure = startup.guardHeldElsewhere()
-                        || RestoreCoordinator.journalMayExist(settings.stateDirectory());
+                        || RestoreCoordinator.journalMayConcern(settings.stateDirectory(), settings.serverRoot());
                 throw new IOException(startup.message());
             }
             if (startup.disposition() == RestoreCoordinator.StartupDisposition.GUARDED_DEGRADED) {
@@ -117,8 +128,11 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             }
             if (restores.inheritedRootGuard()) getLogger().info(text("startup.reloaded"));
             restores.startupFailure().ifPresent(message -> {
-                tell(Bukkit.getConsoleSender(), text(restores.startupFinding() == RestoreCoordinator.StartupFinding.FAILED_RESTORE_ROLLED_BACK
-                        ? "startup.rolledback" : "startup.stalecancelled"), false);
+                tell(Bukkit.getConsoleSender(), text(switch (restores.startupFinding()) {
+                    case FAILED_RESTORE_ROLLED_BACK -> "startup.rolledback";
+                    case RESTORE_NOT_APPLIED -> "startup.notapplied";
+                    default -> "startup.stalecancelled";
+                }), false);
                 getLogger().warning(text("job.diagnostic", message));
             });
             restores.consumeVerifiedReceipt().ifPresent(receipt -> tell(Bukkit.getConsoleSender(),
@@ -126,6 +140,7 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
                             receipt.completedAt(), receipt.rollbackDirectory()) + "\n========================================", true));
             restoreGuardStartupFailure = false;
             engine = new BackupEngine(settings.options());
+            claimStorage(settings.backupDirectory());
             warnAboutEnvironment(settings);
             installHelper();
             io = Executors.newSingleThreadExecutor(r -> { Thread t = new Thread(r, "VaultBackup-IO"); t.setDaemon(true); return t; });
@@ -147,6 +162,51 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             } else getLogger().severe(text("startup.disabledonly"));
             getServer().getPluginManager().disablePlugin(this);
         }
+    }
+
+    /** Named so that it can never be taken for an archive or for a file of the restore journal. */
+    static final String OWNER_FILE = "vaultbackup-owner.properties";
+
+    /**
+     * Backups and restore state belong to one server. Up to 1.2.1 the default directories had the
+     * same names for every server in a folder, so two servers side by side shared them: each
+     * deleted the other's backups through retention, offered the other's archives for restore,
+     * and was stopped by the other's restore journal. The first server to use a directory records
+     * its root in it; a different server that still exists is refused there.
+     */
+    private void claimStorage(Path directory) throws IOException {
+        Path root = settings.serverRoot();
+        // A root that is not there right now is for the restore coordinator to classify.
+        if (!Files.isDirectory(root) || !Files.isDirectory(directory)) return;
+        Path marker = directory.resolve(OWNER_FILE);
+        if (Files.exists(marker, LinkOption.NOFOLLOW_LINKS)) {
+            if (!Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS)) throw new IOException(text("startup.ownerfile", marker));
+            Properties recorded = new Properties();
+            try (InputStream input = Files.newInputStream(marker, LinkOption.NOFOLLOW_LINKS)) { recorded.load(input); }
+            catch (IllegalArgumentException malformed) { recorded.clear(); }
+            String value = recorded.getProperty("serverRoot", "");
+            Path owner = null;
+            if (!value.isBlank()) { try { owner = Path.of(value); } catch (InvalidPathException unusable) { owner = null; } }
+            if (owner != null) {
+                if (owner.equals(root)) return;
+                if (Files.exists(owner, LinkOption.NOFOLLOW_LINKS)) {
+                    boolean same;
+                    try { same = Files.isSameFile(owner, root); } catch (IOException unknown) { same = false; }
+                    if (!same) throw new IOException(text("startup.sharedstorage", directory, owner));
+                } else {
+                    // Renamed or moved: the directory comes along with the server.
+                    getLogger().info(text("startup.ownermoved", directory, owner));
+                }
+            }
+        }
+        Properties owner = new Properties();
+        owner.setProperty("serverRoot", root.toString());
+        owner.setProperty("claimedAt", Instant.now().toString());
+        java.io.StringWriter content = new java.io.StringWriter();
+        owner.store(content, "VaultBackup Pro: the server this directory belongs to. Delete this file only when that server no longer uses the directory.");
+        Path temp = Files.createTempFile(directory, ".owner-", ".tmp");
+        try { Files.writeString(temp, content.toString()); Files.move(temp, marker, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
+        finally { Files.deleteIfExists(temp); }
     }
 
     /** Conditions that do not stop the plugin but make backups fail or select nothing; said once, at startup and on reload. */
@@ -389,6 +449,8 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
     private List<String> explain(Throwable error) {
         if (error instanceof BackupEngine.InsufficientSpaceException space)
             return List.of(text("backup.nospace", humanBytes(space.neededBytes()), humanBytes(space.availableBytes())));
+        if (error instanceof BackupEngine.SourceVanishedException vanished)
+            return List.of(text("backup.allvanished", vanished.scanned()));
         if (error instanceof BackupEngine.SourceRefusedException refused) {
             List<String> lines = new ArrayList<>();
             lines.add(text("backup.refused", refused.total()));
@@ -459,14 +521,16 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             BackupEngine jobEngine = engine;
             submit(() -> {
                 try {
-                    List<String> unstable = new ArrayList<>();
+                    List<String> unstable = new ArrayList<>(), vanished = new ArrayList<>();
                     BackupRecord record = jobEngine.createBackup(label, this::isCancelled, p -> {
                         progress = p;
                         // Nothing is read from the server tree any more: do not keep its changes in memory for the verification as well.
                         if (BackupEngine.PHASE_VERIFYING_NEW_ARCHIVE.equals(p)) main(this::restoreAutosave);
-                    }, path -> { if (unstable.size() < UNSTABLE_LOG_LIMIT) unstable.add(path); });
+                    }, path -> { if (unstable.size() < UNSTABLE_LOG_LIMIT) unstable.add(path); },
+                            path -> { if (vanished.size() < UNSTABLE_LOG_LIMIT) vanished.add(path); });
                     main(this::restoreAutosave);
                     reportUnstable(sender, record, unstable);
+                    reportVanished(sender, record, vanished);
                     try {
                         jobEngine.retain(jobSettings.retentionCount() == 0 ? Integer.MAX_VALUE : jobSettings.retentionCount(), jobSettings.retentionBytes() == 0 ? Long.MAX_VALUE : jobSettings.retentionBytes(), restores.protectedBackupIds(), this::isCancelled, p -> progress = p);
                     } catch (Exception error) { reportFailure(sender, "job.retention", error); }
@@ -494,6 +558,23 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         for (String path : named) getLogger().warning(text("backup.unstablefile", path));
         if (record.unstableEntries() > named.size()) getLogger().warning(text("backup.unstablemore", record.unstableEntries() - named.size()));
         if (sender != null) main(() -> tell(sender, summary, false));
+    }
+
+    /**
+     * Files that were listed and then gone are not in the archive. A few are what a running server
+     * does. Many mean that a world was being deleted or a volume went away while the backup ran,
+     * and nobody should have to find that out from a restore.
+     */
+    private void reportVanished(CommandSender sender, BackupRecord record, List<String> named) {
+        int gone = record.vanishedEntries();
+        if (gone == 0) return;
+        boolean many = gone > 20 && gone > record.entryCount() / 10;
+        String summary = many ? text("backup.vanishedmany", gone, record.entryCount()) : text("backup.vanished", gone);
+        if (many) getLogger().warning(summary); else getLogger().info(summary);
+        for (String path : named) getLogger().info(text("backup.vanishedfile", path));
+        if (gone > named.size()) getLogger().info(text("backup.vanishedmore", gone - named.size()));
+        if (sender != null) main(() -> tell(sender, summary, !many));
+        else if (many) main(() -> notifyAdministrators(summary, null));
     }
 
     private void reportBackupOutcome(CommandSender sender, BackupRecord created, PluginSettings jobSettings) {

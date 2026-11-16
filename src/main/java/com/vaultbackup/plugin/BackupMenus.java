@@ -86,6 +86,7 @@ final class BackupMenus implements Listener {
             List<String> lore = new ArrayList<>(List.of(t("common.created",record.createdAt()),t("common.label",record.label()),
                     t("common.archive",VaultBackupPlugin.humanBytes(record.compressedBytes())),t("common.entries",record.entryCount())));
             if (record.unstableEntries() > 0) lore.add(t("list.unstable",record.unstableEntries()));
+            if (record.vanishedEntries() > 0) lore.add(t("list.vanished",record.vanishedEntries()));
             lore.add(t("menu.details"));
             m.put(i-start,Material.ENDER_CHEST,record.id(),lore,"list",who -> openInfo(who,record.id(),current));
         }
@@ -110,7 +111,8 @@ final class BackupMenus implements Listener {
         m.display(4,Material.WRITABLE_BOOK,id,List.of(t("common.created",record.createdAt()),t("common.label",record.label()),
                 t("common.archive",VaultBackupPlugin.humanBytes(record.compressedBytes())),t("common.original",VaultBackupPlugin.humanBytes(record.totalBytes())),
                 t("common.entries",record.entryCount()),"SHA-256: "+record.sha256().substring(0,16)+"…",
-                record.unstableEntries() > 0 ? t("list.unstable",record.unstableEntries()) : t("list.stable")));
+                record.unstableEntries() > 0 ? t("list.unstable",record.unstableEntries()) : t("list.stable"),
+                t("list.vanished",record.vanishedEntries())));
         m.put(11,Material.LIME_CONCRETE,t("menu.restore"),List.of(t("menu.selected",id),t("menu.restore.direct"),t("menu.restore.manual"),t("menu.noautorestart"),t("menu.restore.rollback"),t("menu.excluded"),t("menu.restore.cancelhint")),"restore",who -> { who.closeInventory(); plugin.requestRestore(who,id); });
         m.put(15,Material.RED_CONCRETE,t("menu.delete"),List.of(t("menu.selected",id),t("menu.delete.direct"),t("menu.delete.files"),t("menu.delete.permanent"),t("menu.delete.pinned")),"delete",who -> { who.closeInventory(); plugin.delete(who,id,true); });
         m.put(22,Material.ARROW,t("menu.back"),List.of(),"list",who -> openList(who,page));
