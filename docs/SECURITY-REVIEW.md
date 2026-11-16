@@ -1,4 +1,4 @@
-# 運用上の境界 — VaultBackup Pro 1.2.1
+# 運用上の境界 — VaultBackup Pro 1.2.2
 
 この版は操作手順を簡略化しています。削除は追加確認なしで行い、保持設定によって最後のバックアップもなくなります。独立した復旧用コピーを保管してください。
 
@@ -15,6 +15,38 @@
 ## Additional measured startup boundary
 
 An isolated Paper 26.3 build 179 probe held the root guard in an independent process. The plugin requested shutdown, but Paper subsequently prepared/saved the world and changed level.dat before exiting. Consequently, concurrent server startup during restoration is unsupported; the plugin cannot guarantee prevention of those writes or resulting corruption. Auto-restart must be disabled and manual startup must wait for helper completion and exit. The previous independent source review did not certify this subsequently measured boundary; an additional independent review was unavailable. This distribution is an prerelease test build, not a production-safety certification. The cause of the reported user shutdown incident remains unconfirmed.
+
+## 1.2.2 で修正した問題
+
+多数のエージェントによる網羅的なコード監査と、各指摘への反証検証を行い、確定した問題を修正しました。
+
+保存先と復元の安全性:
+- 同じ親フォルダーに並べた複数サーバーが既定の保存先を共有し、別サーバーのバックアップの一覧表示・復元、保存制限による他サーバーの（復元予約中を含む）アーカイブの削除、1 台の復元予約で他のサーバーが起動のたびに安全停止する問題がありました。保存先と状態保存先をサーバーごとに紐づけ、別サーバーの保存先はそのサーバーの VaultBackup だけを無効にします。
+- ヘルパー JAR の SHA-256 確認と起動の間にファイルを差し替えられる隙がありました。確認したバイト列をジョブ専用（所有者のみ）のフォルダーにコピーし、それを起動します。
+- ロックファイルが他ユーザーから読める権限で作成され、他のアカウントが共有ロックを保持するとバックアップ・削除・保存制限やサーバー起動を妨げられました。所有者のみで作成・修正します。
+- 細工したアーカイブの深いパスで、検証時のメモリ使用量がパスの深さの 2 乗で増え、サーバーのメモリを使い果たせました。必要メモリをマニフェストの大きさに比例する方式へ変更しました。
+- 付属情報のラベルやアーカイブ内のパスに含まれる書式コード（§）や Unicode の改行文字で、チャット・コンソール・GUI に本物そっくりの案内行を偽装できました。表示時に無害化し、不正なラベルを拒否します。ログに出すパスの制御文字もエスケープします。
+
+復元の可用性・復旧:
+- 再起動後などに記録済みの PID が別プロセス（スレッド ID、終了済みの未回収プロセスを含む）に使われていると、`--recover` や起動時の整理が永久に拒否され、サーバーを起動できない・VaultBackup が無効のままになる場合がありました。ルートガード取得中に限り、ジョブ作成より後に起動したプロセスなどを「記録したプロセスは終了済み」と判定します。ヘルパー不在の積極的な証明として helper.lock も使います。
+- 元データを元の場所へ戻した直後にクラッシュや書込み失敗があると、`--recover` も起動時処理も状態を解決できませんでした。作業領域や失敗ツリーで復元対象を確認できる場合は復旧済みとして記録します。
+- 空き容量を確認せずに展開を始め、ディスクが満杯になると作業領域が残り、状態記録も書けずに起動できなくなる場合がありました。展開前（予約時と適用時）に空き容量を確認し、置換前の失敗では作成した作業領域を削除します。
+- 時計の調整（ステップ）後にヘルパーがサーバー JVM を識別できず、予約がすべて失敗する問題、端末の Ctrl+C や SSH 切断でヘルパーも終了する問題（Linux は setsid で別セッション起動）、Windows でフォルダー使用中に名前変更が失敗する問題（再試行と案内）を修正しました。
+- 復元成功後に元データの退避フォルダーを削除すると、起動のたびに安全停止する問題を修正しました。
+
+バックアップの信頼性:
+- `backup.include` がディレクトリに効かず、`include: [world]` で空のバックアップが「成功」し、保存制限で実際の復元点が失われる問題を修正しました。
+- 除外した読み取り不可ディレクトリ（`lost+found` など）や、Linux 上の Windows 予約名（`con.yml` など）、非 UTF-8 ロケールで正しく保存できないファイル名で、すべてのバックアップが失敗または名前が変わる問題を修正しました。
+- 削除や作成が中断した `ID.zip` が永久に残り容量を消費する問題、時計がずれると作成したばかりのバックアップを保存制限が削除する問題、検証に失敗したバックアップが通知なく一覧から消える問題を修正しました。
+
+プラグインの動作:
+- 一覧の再検証が復元予約の取り消しを長時間妨げる問題、チャットで削除しても GUI が開く問題、保存中の Error でワールドの自動保存が無効のまま残る問題、予約確定後の状態確認の失敗を「予約失敗」と表示する問題、config.yml を同期書込みしない問題などを修正しました。
+- 設定や状態保存先の誤り（シンボリックリンクを含む親フォルダー、通常ファイルの状態保存先）でサーバー全体を停止していた問題を、プラグインのみの無効化に変更しました。
+
+配布ツール:
+- 版数の手書きにより古い JAR を試験し得る問題、`python -O` で検査が無効になり未試験のバイト列を配布し得る問題、シンボリックリンクの親フォルダー経由で外部ファイルを同梱し得る問題、Windows で再現ビルドできない問題（改行コード）を修正しました。
+
+上記の修正はソースレビュー、修正前コードでの再現、隔離試験（TEST-RESULTS.md）で確認しました。1.2.2 では実サーバー試験を再実施していません。
 
 ## 1.2.1 で修正した問題
 

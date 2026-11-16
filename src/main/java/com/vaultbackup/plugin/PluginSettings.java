@@ -28,12 +28,17 @@ public record PluginSettings(Path serverRoot, Path backupDirectory, Path stateDi
     public static PluginSettings from(YamlConfiguration y) throws IOException {
         String language = requiredString(y, "language", Messages.DEFAULT_LANGUAGE);
         if (!Messages.supported(language)) throw invalid(y, "settings.language");
-        Path root = Path.of(requiredString(y, "storage.server-root", ".")).toAbsolutePath().normalize();
-        // Keep the configured lexical root intact, even when missing, a file or a symlink.
+        Path lexical = Path.of(requiredString(y, "storage.server-root", ".")).toAbsolutePath().normalize();
+        // Keep the root's own last segment intact, even when missing, a file or a symlink.
         // The startup coordinator acquires its lifetime guard before classifying those as
         // HARD_CONFLICT. Never create or resolve away an unsafe root during config parsing.
         // A filesystem root can never be restored, though: that is purely a configuration error.
-        if (root.getParent() == null) throw invalid(y, "settings.rootparent");
+        if (lexical.getParent() == null) throw invalid(y, "settings.rootparent");
+        // Resolve only the existing parent: a symlinked or differently spelled ancestor must not
+        // turn into a startup conflict (which stops the server), and every containment check below
+        // must compare real paths with a real root, never with a link spelling of it.
+        Path parent = lexical.getParent();
+        Path root = Files.isDirectory(parent) ? parent.toRealPath().resolve(lexical.getFileName().toString()) : lexical;
         Path backup = resolve(y, root, requiredString(y, "storage.backup-directory", "../VaultBackup-backups"));
         Path state = resolve(y, root, requiredString(y, "storage.state-directory", "../VaultBackup-state"));
         Path helper = resolve(y, root, requiredString(y, "restore.helper-jar", "../VaultBackup-state/helper/vaultbackup-restore.jar"));

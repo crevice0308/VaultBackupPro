@@ -2,6 +2,10 @@
 
 Java 25 is the release baseline.
 
+## 1.2.2 verification scope
+
+1.2.2 compiles against the same pinned Spigot 26.2 API and passes the isolated build/test suite in TEST-RESULTS.md. Spigot runtime tests were not run for 1.2.2.
+
 ## 1.2.1 verification scope
 
 1.2.1 compiles against the same pinned Spigot 26.2 API and passes the isolated build/test suite in TEST-RESULTS.md. Spigot runtime tests were not run for 1.2.1.

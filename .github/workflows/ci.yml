@@ -21,3 +21,7 @@ jobs:
         run: (cd build/libs && sha256sum VaultBackupPro-*.jar vaultbackup-restore-*.jar)
       - name: Verify the tested release bytes
         run: (cd build/libs && sha256sum --check ../../release/SHA256SUMS.txt)
+      - name: Package the public release files without publishing
+        run: |
+          python3 tools/package_release.py "$RUNNER_TEMP/dist"
+          (cd "$RUNNER_TEMP/dist" && sha256sum --check SHA256SUMS.txt)

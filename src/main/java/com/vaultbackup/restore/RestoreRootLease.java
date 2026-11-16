@@ -36,8 +36,7 @@ final class RestoreRootLease {
         RestoreFiles.external(root,state,"State directory");
         state=RestoreFiles.directory(state,true);
         root=guardIdentity(root,state);
-        FileChannel channel=FileChannel.open(state.resolve(RestoreFiles.guardName(root)),
-                StandardOpenOption.CREATE,StandardOpenOption.WRITE,LinkOption.NOFOLLOW_LINKS);
+        FileChannel channel=RestoreFiles.openLockFile(state.resolve(RestoreFiles.guardName(root)));
         FileLock lock;
         try {lock=channel.tryLock();}
         catch(OverlappingFileLockException e) {

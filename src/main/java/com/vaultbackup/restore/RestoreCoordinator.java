@@ -17,7 +17,13 @@ public final class RestoreCoordinator {
     public record Receipt(String jobId, String backupId, Instant completedAt, Path rollbackDirectory) {}
     public record Status(String jobId, String backupId, String state, String message, Path jobFile, boolean cancellable) {}
     public record CancelResult(String jobId, boolean cancelled, String message) {}
-    public enum StartupDisposition { READY, GUARDED_DEGRADED, HARD_CONFLICT }
+    /**
+     * CONFIG_CONFLICT: the state directory belongs to another server root. That is a configuration
+     * error, never a half-finished swap of THIS root: disable the plugin, do not stop the server.
+     */
+    public enum StartupDisposition { READY, GUARDED_DEGRADED, HARD_CONFLICT, CONFIG_CONFLICT }
+    /** Binds a state directory to exactly one server root (same name as the backup-store marker). */
+    static final String OWNER_MARKER=".vaultbackup-owner.properties";
     public record StartupResult(StartupDisposition disposition, RestoreCoordinator coordinator, String message) {}
     private record Pending(Reservation value, Path archive, String manifestSha256) {}
     private final Path root, backups, state, helperJar;
@@ -57,7 +63,7 @@ public final class RestoreCoordinator {
     public RestoreCoordinator(Path serverRoot, Path backupDirectory, Path stateDirectory, Path helperJar,String language)throws IOException {
         this(RestoreRootLease.acquire(serverRoot,stateDirectory),backupDirectory,helperJar,language,message -> {});
         StartupResult result=reconcileStartup();
-        if(result.disposition()==StartupDisposition.HARD_CONFLICT)throw new IOException(result.message());
+        if(result.disposition()==StartupDisposition.HARD_CONFLICT || result.disposition()==StartupDisposition.CONFIG_CONFLICT)throw new IOException(result.message());
         if(result.disposition()==StartupDisposition.READY) {
             RestoreFiles.directory(backups,true);RestoreFiles.directory(state.resolve("restore-jobs"),true);
         }
@@ -81,8 +87,39 @@ public final class RestoreCoordinator {
         startupDisposition=disposition;startupDiagnostic=message;
         return new StartupResult(disposition,this,message);
     }
+    /**
+     * Returns null when this root owns, or has just claimed, the state directory; otherwise the
+     * owning root. Sibling servers resolving the same default paths would otherwise share one
+     * active-restore marker, and each one's reservation would stop the others at startup.
+     */
+    private String foreignStateOwner()throws IOException {
+        Path marker=state.resolve(OWNER_MARKER);String expected=root.toString();
+        if(Files.exists(marker,RestoreFiles.NOFOLLOW) && Files.size(marker)>0) {
+            String owner=RestoreFiles.required(RestoreFiles.load(marker),"serverRoot");
+            return owner.equals(expected)?null:owner;
+        }
+        // Unclaimed directory from an older version: a pending job bound to another root marks it
+        // as that server's. Never claim it, and never reconcile the other server's journal.
+        if(Files.exists(activeFile(),RestoreFiles.NOFOLLOW)) {
+            try {
+                Properties active=RestoreFiles.load(activeFile());
+                Properties job=RestoreFiles.load(jobDirectory(RestoreFiles.required(active,"jobId")).resolve("job.properties"));
+                String bound=RestoreFiles.required(job,"serverRoot");
+                if(!bound.equals(expected))return bound;
+            } catch(IOException | RuntimeException unreadable) {
+                return null; // Leave it unclaimed; journal validation below classifies it.
+            }
+        }
+        Properties owner=new Properties();owner.setProperty("formatVersion","1");owner.setProperty("serverRoot",expected);
+        try{RestoreFiles.write(marker,owner);}catch(IOException bestEffort){ /* An unwritable marker never blocks startup. */ }
+        return null;
+    }
     private StartupResult reconcileStartup() {
         try {
+            String foreign=foreignStateOwner();
+            if(foreign!=null)return startup(StartupDisposition.CONFIG_CONFLICT,"State directory "+state+" belongs to another server root ("
+                    +foreign+"). Give every server its own storage.state-directory and storage.backup-directory. If this server was moved,"
+                    +" delete "+state.resolve(OWNER_MARKER)+" only after confirming that no other server uses this directory.");
             RestoreFiles.directory(root,false);
             if(!Files.exists(activeFile(),RestoreFiles.NOFOLLOW))return startup(StartupDisposition.READY,"");
             Properties active=RestoreFiles.load(activeFile());String id=RestoreFiles.required(active,"jobId");
@@ -180,6 +217,11 @@ public final class RestoreCoordinator {
         if(!file.startsWith(backups) || file.equals(backups))throw new IOException("Archive is outside the configured backup directory");
         synchronized(this){ensureNoCommitted();}
         RestoreArchive.Verified verified=RestoreArchive.verify(file,expectedSha256);
+        // Advisory here (space changes while the server runs); the helper re-checks before staging.
+        long required=RestoreMain.requiredStageSpace(verified.totalBytes(),verified.entries().size());
+        long usable=Files.getFileStore(root).getUsableSpace();
+        if(usable<required)throw new IOException("Not enough free space beside the server root to restore this backup: about "
+                +RestoreMain.bytes(required)+" is needed, "+RestoreMain.bytes(usable)+" is available");
         Reservation value=new Reservation(RestoreFiles.randomSecret().substring(0,24),backupId,expectedSha256,verified.entries().size(),verified.totalBytes(),Instant.now().plus(ttl));
         synchronized(this){ensureNoCommitted();pending.clear();pending.put(value.token(),new Pending(value,file,verified.manifestSha256()));}return value;
     }
@@ -218,6 +260,8 @@ public final class RestoreCoordinator {
         job.setProperty("archive",p.archive.toString());job.setProperty("archiveSha256",p.value.archiveSha256());job.setProperty("manifestSha256",p.manifestSha256);
         job.setProperty("entryCount",Integer.toString(p.value.entryCount()));job.setProperty("totalBytes",Long.toString(p.value.totalBytes()));
         job.setProperty("parentPid",Long.toString(parentPid));job.setProperty("parentStartedAt",parentStartedAt.toString());job.setProperty("nonce",RestoreFiles.randomSecret());job.setProperty("createdAt",Instant.now().toString());
+        // A manual helper run under another locale would restore file names as different bytes.
+        String encoding=System.getProperty("sun.jnu.encoding");if(encoding!=null && !encoding.isBlank())job.setProperty("fileNameEncoding",encoding);
         for(String kind:List.of("stage","rollback","failed"))job.setProperty(kind,root.resolveSibling(root.getFileName()+".vaultbackup-"+kind+"-"+id).toString());
         RestoreFiles.write(dir.resolve("job.properties"),job);writeStatus(dir,"COMMITTED","Starting helper for a manual-stop reservation");
         Properties active=new Properties();active.setProperty("jobId",id);active.setProperty("backupId",p.value.backupId());
@@ -226,13 +270,16 @@ public final class RestoreCoordinator {
         try{RestoreFiles.write(activeFile(),active);}catch(IOException e){return failedHandshake(id,null,"Could not publish restore reservation: "+e.getMessage());}
         Process process=null;
         try {
-            RestoreFiles.regular(helperJar);
-            if(expectedHelperSha256!=null && !RestoreFiles.constantEquals(RestoreFiles.sha(helperJar),expectedHelperSha256))
-                throw new IOException("Installed restore helper does not match the helper bundled with this plugin. It was not started. Restart the server so the plugin reinstalls it, then reserve again");
+            Path launchJar=privateHelperCopy(dir);
             String executable=System.getProperty("os.name","").toLowerCase(Locale.ROOT).contains("win")?"java.exe":"java";
             Path java=Path.of(System.getProperty("java.home"),"bin",executable);
             try(RestoreJobState.Gate gate=RestoreJobState.requireLock(dir)) {
-                process=new ProcessBuilder(java.toString(),"-jar",helperJar.toString(),"--job",dir.resolve("job.properties").toString())
+                List<String> command=new ArrayList<>();
+                // Leave the server's terminal session and process group: Ctrl+C in the console or
+                // closing an SSH session must not kill the helper that waits for the server to stop.
+                Path setsid=sessionLauncher();if(setsid!=null)command.add(setsid.toString());
+                command.addAll(List.of(java.toString(),"-jar",launchJar.toString(),"--job",dir.resolve("job.properties").toString()));
+                process=new ProcessBuilder(command)
                         .directory(state.toFile()).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.appendTo(dir.resolve("helper.log").toFile())).start();
                 processes.put(id,process);RestoreJobState.recordProcess(dir,job,process.toHandle());
             }
@@ -244,6 +291,40 @@ public final class RestoreCoordinator {
             }
             return failedHandshake(id,process,"Helper did not acknowledge readiness");
         }catch(IOException | RuntimeException e){return failedHandshake(id,process,e.getMessage());}
+    }
+    /**
+     * Hash the installed helper's bytes once, then launch exactly those bytes from a copy in the
+     * new owner-only job directory. Launching the shared helper path would let anyone who can
+     * rename files there swap the jar between the hash check and the JVM opening it.
+     */
+    private Path privateHelperCopy(Path dir)throws IOException {
+        RestoreFiles.regular(helperJar);
+        if(Files.size(helperJar)>64L<<20)throw new IOException("Installed restore helper is unexpectedly large");
+        byte[] bytes=Files.readAllBytes(helperJar);
+        String digest=HexFormat.of().formatHex(RestoreFiles.digest().digest(bytes));
+        if(expectedHelperSha256!=null && !RestoreFiles.constantEquals(digest,expectedHelperSha256))
+            throw new IOException("Installed restore helper does not match the helper bundled with this plugin. It was not started. Restart the server so the plugin reinstalls it, then reserve again");
+        Path copy=dir.resolve("helper.jar");
+        try(java.nio.channels.FileChannel channel=RestoreFiles.createPrivateFile(copy)) {
+            java.nio.ByteBuffer buffer=java.nio.ByteBuffer.wrap(bytes);
+            while(buffer.hasRemaining())channel.write(buffer);
+            channel.force(true);
+        }
+        if(!RestoreFiles.constantEquals(RestoreFiles.sha(copy),digest))throw new IOException("Private helper copy did not verify; it was not started");
+        return copy;
+    }
+    /**
+     * Linux setsid(1) starts the helper in a new session without forking when, as here, the child
+     * is not a process-group leader, so the launched PID stays the helper JVM's PID. Elsewhere
+     * (and for service-manager or container stops) the documentation describes the limits.
+     */
+    private static Path sessionLauncher() {
+        if(!System.getProperty("os.name","").toLowerCase(Locale.ROOT).contains("linux"))return null;
+        for(String candidate:List.of("/usr/bin/setsid","/bin/setsid")) {
+            Path path=Path.of(candidate);
+            if(Files.isRegularFile(path) && Files.isExecutable(path))return path;
+        }
+        return null;
     }
     private LaunchResult launchResult(String id)throws IOException {
         Path dir=jobDirectory(id);String current=RestoreFiles.status(dir);
@@ -372,7 +453,11 @@ public final class RestoreCoordinator {
         for(String key:List.of("jobId","backupId","serverRoot","archiveSha256","manifestSha256"))if(!RestoreFiles.required(job,key).equals(RestoreFiles.required(receipt,key)))throw new IOException("Receipt does not match committed job: "+key);
         if(!root.toString().equals(RestoreFiles.required(receipt,"serverRoot")))throw new IOException("Receipt is for another server");
         if(!RestoreFiles.constantEquals(RestoreFiles.required(receipt,"authentication"),RestoreFiles.hmac(RestoreFiles.required(job,"nonce"),RestoreFiles.receiptPayload(receipt))))throw new IOException("Receipt authentication failed");
-        Path rollback=Path.of(RestoreFiles.required(receipt,"rollbackDirectory"));if(!rollback.toString().equals(RestoreFiles.required(job,"rollback")))throw new IOException("Receipt rollback path mismatch");RestoreFiles.directory(rollback,false);
+        Path rollback=Path.of(RestoreFiles.required(receipt,"rollbackDirectory"));if(!rollback.toString().equals(RestoreFiles.required(job,"rollback")))throw new IOException("Receipt rollback path mismatch");
+        // The authenticated receipt proves the verified install. An administrator may already have
+        // removed the preserved original copy; that must not stop this server on every start.
+        if(Files.exists(rollback,RestoreFiles.NOFOLLOW))RestoreFiles.directory(rollback,false);
+        else logger.accept("[restore] The preserved original server data ("+rollback+") no longer exists; the verified restore is accepted without it.");
         try{return new Receipt(id,RestoreFiles.required(receipt,"backupId"),Instant.parse(RestoreFiles.required(receipt,"completedAt")),rollback);}catch(RuntimeException e){throw new IOException("Invalid receipt timestamp",e);}
     }
     private void validateBoundJob(Properties job,String id)throws IOException {

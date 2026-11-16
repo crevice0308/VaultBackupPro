@@ -7,6 +7,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.security.*;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import javax.crypto.Mac;
@@ -27,8 +28,17 @@ final class RestoreFiles {
         if (!Files.isDirectory(absolute, NOFOLLOW) || Files.isSymbolicLink(absolute))
             throw new IOException("Not a real directory: " + absolute);
         Path real = absolute.toRealPath();
-        if (!real.equals(absolute)) throw new IOException("Symlink directory components are not permitted: " + absolute);
+        if (!sameSpelling(real, absolute)) throw new IOException("Symlink directory components are not permitted: " + absolute);
         return real;
+    }
+    /**
+     * macOS Path.of() stores names decomposed (NFD) while realpath(3) returns the name as stored,
+     * often precomposed. Both string forms are NFC there, so compare those; the per-component
+     * symlink checks remain the actual link detection. Elsewhere the bytes must match exactly.
+     */
+    private static boolean sameSpelling(Path real, Path absolute) {
+        if (real.equals(absolute)) return true;
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac") && real.toString().equals(absolute.toString());
     }
     static void createPrivateDirectory(Path path) throws IOException {
         try { Files.createDirectory(path, java.nio.file.attribute.PosixFilePermissions.asFileAttribute(java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"))); }
@@ -40,7 +50,7 @@ final class RestoreFiles {
     }
     static void regular(Path file) throws IOException {
         if (!Files.isRegularFile(file, NOFOLLOW) || Files.isSymbolicLink(file)
-                || !file.toAbsolutePath().normalize().equals(file.toRealPath()))
+                || !sameSpelling(file.toRealPath(), file.toAbsolutePath().normalize()))
             throw new IOException("Expected a regular file without symlink components: " + file);
     }
     static Properties load(Path file) throws IOException {
@@ -59,6 +69,32 @@ final class RestoreFiles {
         } catch (UnsupportedOperationException nonPosix) {
             return FileChannel.open(file, open);
         }
+    }
+    /**
+     * Lock files are owner-only: on POSIX, any account able to open one could hold a shared lock
+     * and block the exclusive locks restore safety depends on. Files from older versions are
+     * tightened in place; the inode other processes lock is never replaced.
+     */
+    static FileChannel openLockFile(Path file) throws IOException {
+        Set<OpenOption> open = Set.of(StandardOpenOption.CREATE, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+        FileChannel channel;
+        try {
+            channel = FileChannel.open(file, open, java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                    java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")));
+        } catch (UnsupportedOperationException nonPosix) {
+            channel = FileChannel.open(file, open);
+        }
+        var view = Files.getFileAttributeView(file, java.nio.file.attribute.PosixFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
+        if (view != null) {
+            var ownerOnly = EnumSet.of(java.nio.file.attribute.PosixFilePermission.OWNER_READ, java.nio.file.attribute.PosixFilePermission.OWNER_WRITE);
+            try {
+                var current = view.readAttributes();
+                if (!ownerOnly.containsAll(current.permissions())) view.setPermissions(ownerOnly);
+            } catch (IOException | RuntimeException bestEffort) {
+                // Never turn a lock that still works into a startup conflict over a permission change.
+            }
+        }
+        return channel;
     }
     static void write(Path file, Properties p) throws IOException {
         Path temp = file.resolveSibling(file.getFileName() + ".tmp-" + UUID.randomUUID());
@@ -111,7 +147,25 @@ final class RestoreFiles {
     }
     static void move(Path from, Path to) throws IOException {
         if (Files.exists(to, NOFOLLOW)) throw new IOException("Refusing to replace existing path: " + to);
-        Files.move(from, to, StandardCopyOption.ATOMIC_MOVE);
+        boolean windows = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+        long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
+        while (true) {
+            try { Files.move(from, to, StandardCopyOption.ATOMIC_MOVE); break; }
+            catch (FileSystemException e) {
+                // Windows refuses to rename a directory while any process (a console whose current
+                // directory is inside it, an indexer, antivirus) has an open handle in it. A failed
+                // atomic rename changed nothing, so a bounded retry is safe.
+                if (!windows || e instanceof AtomicMoveNotSupportedException || e instanceof NoSuchFileException
+                        || e instanceof FileAlreadyExistsException || System.nanoTime() >= deadline
+                        || Files.exists(to, NOFOLLOW) || !Files.exists(from, NOFOLLOW)) {
+                    if (windows && !(e instanceof AtomicMoveNotSupportedException))
+                        throw new IOException("Could not rename " + from + " to " + to + ". Close every console, Explorer window and program"
+                                + " whose current folder is inside the server folder, then run the helper again.", e);
+                    throw e;
+                }
+                try { Thread.sleep(500); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw e; }
+            }
+        }
         syncDirectory(to.getParent());
     }
     static String randomSecret() {
@@ -166,17 +220,86 @@ final class RestoreFiles {
                 required(p,"stage"),required(p,"rollback"),required(p,"failed"),
                 required(p,"outcome"),required(p,"completedAt"));
     }
-    static void requireDeadParent(Properties job) throws IOException {
+    /**
+     * A PID that now belongs to a process started clearly after the recorded process (and after the
+     * job existed) proves the recorded process is gone. Each JVM derives start instants from its
+     * own cached boot time, so small differences are uncertainty, never proof. The lifetime root
+     * guard and world session locks remain the independent, authoritative liveness checks.
+     */
+    static final Duration IDENTITY_TOLERANCE = Duration.ofMinutes(2);
+    static boolean reusedAfter(Instant actual, Instant recordedStart, Properties job, boolean requireJobCreation) {
+        Instant floor = recordedStart;
+        String created = job.getProperty("createdAt");
+        if (created == null) {
+            if (requireJobCreation) return false;
+        } else {
+            try { Instant value = Instant.parse(created); if (value.isAfter(floor)) floor = value; }
+            catch (RuntimeException unreadable) { if (requireJobCreation) return false; }
+        }
+        return actual.isAfter(floor.plus(IDENTITY_TOLERANCE));
+    }
+    /**
+     * Linux ProcessHandle.of() also resolves thread IDs. A number that is only a thread of another
+     * process names no process at all, so the recorded JVM (always a process) is gone.
+     */
+    static boolean threadOfAnotherProcess(long pid) {
+        if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("linux")) return false;
+        try {
+            for (String line : Files.readAllLines(Path.of("/proc", Long.toString(pid), "status"), java.nio.charset.StandardCharsets.ISO_8859_1))
+                if (line.startsWith("Tgid:")) return Long.parseLong(line.substring(5).trim()) != pid;
+        } catch (IOException | RuntimeException unknown) { /* Never proof of death. */ }
+        return false;
+    }
+    /**
+     * Linux reports an exited but not yet reaped process (a zombie) as alive. It has already closed
+     * every file and released every lock, so it is not a running server JVM or helper.
+     */
+    static boolean exitedButUnreaped(long pid) {
+        if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("linux")) return false;
+        try {
+            String stat = Files.readString(Path.of("/proc", Long.toString(pid), "stat"), java.nio.charset.StandardCharsets.ISO_8859_1);
+            int end = stat.lastIndexOf(')');
+            if (end < 0 || end + 2 >= stat.length()) return false;
+            char state = stat.charAt(end + 2);
+            return state == 'Z' || state == 'X';
+        } catch (IOException | RuntimeException unknown) { return false; }
+    }
+    /** Strict check outside the root guard: a living process with the recorded identity, or none readable. */
+    static void requireDeadParent(Properties job) throws IOException { requireDeadParent(job, null, false); }
+    /**
+     * observedStart: this JVM's own earlier observation of the living parent, when it has one.
+     * guardHeld: the caller holds the server-root guard, which every living server JVM holds, so a
+     * PID that now names a process started after this job existed proves the recorded JVM is gone.
+     */
+    static void requireDeadParent(Properties job, Instant observedStart, boolean guardHeld) throws IOException {
         long pid;
         Instant start;
         try { pid = Long.parseLong(required(job,"parentPid")); start = Instant.parse(required(job,"parentStartedAt")); }
         catch (RuntimeException e) { throw new IOException("Invalid recorded parent identity", e); }
         Optional<ProcessHandle> process = ProcessHandle.of(pid);
-        if (process.isPresent()) {
-            Optional<Instant> actual = process.get().info().startInstant();
-            if (actual.isEmpty() || !actual.get().equals(start))
-                throw new IOException("Parent PID identity is uncertain or reused. No restore is permitted.");
-            if (process.get().isAlive()) throw new IOException("Recorded server JVM is still alive. No restore is permitted.");
+        if (process.isEmpty() || threadOfAnotherProcess(pid) || exitedButUnreaped(pid)) return;
+        Optional<Instant> actual = process.get().info().startInstant();
+        if (actual.isEmpty()) throw new IOException("Parent PID identity is uncertain or reused. No restore is permitted.");
+        boolean same = actual.get().equals(start) || actual.get().equals(observedStart);
+        if (!same) {
+            // This JVM watched the living parent itself: its own, exact observation now names
+            // a different process, so the parent exited and its PID was reused.
+            if (observedStart != null) return;
+            if (guardHeld && reusedAfter(actual.get(), start, job, true)) return;
+            throw new IOException("Parent PID identity is uncertain or reused. No restore is permitted.");
         }
+        if (process.get().isAlive()) throw new IOException("Recorded server JVM is still alive. No restore is permitted.");
+    }
+    /** Before the root guard: refuse a living recorded JVM; a different identity is decided under the guard. */
+    static void refuseLiveParent(Properties job) throws IOException {
+        long pid;
+        Instant start;
+        try { pid = Long.parseLong(required(job,"parentPid")); start = Instant.parse(required(job,"parentStartedAt")); }
+        catch (RuntimeException e) { throw new IOException("Invalid recorded parent identity", e); }
+        Optional<ProcessHandle> process = ProcessHandle.of(pid);
+        if (process.isEmpty() || threadOfAnotherProcess(pid) || exitedButUnreaped(pid)) return;
+        Optional<Instant> actual = process.get().info().startInstant();
+        if (actual.isEmpty()) throw new IOException("Parent PID identity is uncertain or reused. No restore is permitted.");
+        if (actual.get().equals(start) && process.get().isAlive()) throw new IOException("Recorded server JVM is still alive. No restore is permitted.");
     }
 }

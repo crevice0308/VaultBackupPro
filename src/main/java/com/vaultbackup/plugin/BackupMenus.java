@@ -61,7 +61,7 @@ final class BackupMenus implements Listener {
         int start = current*45;
         for (int i=start; i<Math.min(start+45,records.size()); i++) {
             BackupRecord record = records.get(i);
-            m.put(i-start,Material.ENDER_CHEST,record.id(),List.of(t("common.created",record.createdAt()),t("common.label",record.label()),
+            m.put(i-start,Material.ENDER_CHEST,record.id(),List.of(t("common.created",record.createdAt()),t("common.label",Messages.safe(record.label())),
                     t("common.archive",VaultBackupPlugin.humanBytes(record.compressedBytes())),t("common.entries",record.entryCount()),t("menu.details")),"list",who -> openInfo(who,record.id(),current));
         }
         if (records.isEmpty()) m.display(22,Material.BARRIER,t("menu.empty"),List.of(t("menu.empty.hint")));
@@ -75,11 +75,11 @@ final class BackupMenus implements Listener {
         BackupRecord record = plugin.find(id).orElse(null);
         if (record == null) { plugin.tell(p,t("list.missing"),false); openList(p,page); return; }
         Menu m = make(p,t("menu.info"),27);
-        m.display(4,Material.WRITABLE_BOOK,id,List.of(t("common.created",record.createdAt()),t("common.label",record.label()),
+        m.display(4,Material.WRITABLE_BOOK,id,List.of(t("common.created",record.createdAt()),t("common.label",Messages.safe(record.label())),
                 t("common.archive",VaultBackupPlugin.humanBytes(record.compressedBytes())),t("common.original",VaultBackupPlugin.humanBytes(record.totalBytes())),
                 t("common.entries",record.entryCount()),"SHA-256: "+record.sha256().substring(0,16)+"…"));
         m.put(11,Material.LIME_CONCRETE,t("menu.restore"),List.of(t("menu.selected",id),t("menu.restore.direct"),t("menu.restore.manual"),t("menu.noautorestart"),t("menu.restore.rollback"),t("menu.excluded"),t("menu.restore.cancelhint")),"restore",who -> { who.closeInventory(); plugin.requestRestore(who,id); });
-        m.put(15,Material.RED_CONCRETE,t("menu.delete"),List.of(t("menu.selected",id),t("menu.delete.direct"),t("menu.delete.files"),t("menu.delete.permanent"),t("menu.delete.pinned")),"delete",who -> { who.closeInventory(); plugin.delete(who,id); });
+        m.put(15,Material.RED_CONCRETE,t("menu.delete"),List.of(t("menu.selected",id),t("menu.delete.direct"),t("menu.delete.files"),t("menu.delete.permanent"),t("menu.delete.pinned")),"delete",who -> { who.closeInventory(); plugin.delete(who,id,true); });
         m.put(22,Material.ARROW,t("menu.back"),List.of(),"list",who -> openList(who,page));
         show(p,m);
     }

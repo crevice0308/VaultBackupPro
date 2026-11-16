@@ -42,7 +42,8 @@ final class BackupCommands implements CommandExecutor, TabCompleter {
                         if (page > pages) { plugin.tell(sender,t("list.page",pages),false); return; }
                         plugin.tell(sender,t("list.title",page,pages),true);
                         if (records.isEmpty()) plugin.tell(sender,t("list.empty"),true);
-                        records.stream().skip((page-1L)*10).limit(10).forEach(r -> plugin.tell(sender,r.id() + " | " + r.createdAt() + " | " + VaultBackupPlugin.humanBytes(r.compressedBytes()) + " | " + r.label(),true));
+                        records.stream().skip((page-1L)*10).limit(10).forEach(r -> plugin.tell(sender,r.id() + " | " + r.createdAt() + " | " + VaultBackupPlugin.humanBytes(r.compressedBytes()) + " | " + Messages.safe(r.label()),true));
+                        plugin.reportRejected(sender);
                     });
                 }
                 case "restore" -> {
@@ -51,7 +52,7 @@ final class BackupCommands implements CommandExecutor, TabCompleter {
                     else throw invalid("command.usage", "/backup restore <id> | /backup restore cancel");
                 }
                 case "delete" -> {
-                    if (args.length == 2) plugin.delete(sender,args[1]);
+                    if (args.length == 2) plugin.delete(sender,args[1],false);
                     else throw invalid("command.usage", "/backup delete <id>");
                 }
                 case "status" -> { exact(args,1,"/backup status"); plugin.status(sender); }

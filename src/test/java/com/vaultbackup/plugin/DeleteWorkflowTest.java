@@ -67,6 +67,11 @@ public final class DeleteWorkflowTest {
     private static void drainMain(Deque<Runnable> tasks) { while (!tasks.isEmpty()) tasks.removeFirst().run(); }
     private static boolean contains(List<String> messages, String text) { return messages.stream().anyMatch(m->m.contains(text)); }
 
+    /** A lifecycle handle whose save raises an Error, as an OutOfMemoryError during a world save would. */
+    public static final class ErrorHandle {
+        public boolean hasStopped() { return false; }
+        public boolean saveEverything(boolean silent, boolean flush, boolean force) { throw new StackOverflowError("fixture save error"); }
+    }
     private static Inventory inventory(InventoryHolder holder, int size) {
         Map<Integer,ItemStack> items=new HashMap<>();
         return (Inventory)Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),new Class<?>[]{Inventory.class},(p,m,a)->switch(m.getName()) {
@@ -132,8 +137,12 @@ public final class DeleteWorkflowTest {
                         if(m.getName().equals("runTask") && a[1] instanceof Runnable task)main.add(task);
                         return defaultValue(m.getReturnType());
                     });
-            Server server=(Server)Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),new Class<?>[]{Server.class},
+            ServerLifecycleProbe.Handle saveHandle=new ServerLifecycleProbe.Handle();Object[] lifecycle={saveHandle};
+            Server server=(Server)Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),new Class<?>[]{Server.class,ServerLifecycleProbe.HandleAccess.class},
                     (p,m,a)->switch(m.getName()) {
+                        case "getServer" -> lifecycle[0];
+                        case "isPrimaryThread" -> true;
+                        case "getWorlds" -> List.of();
                         case "getScheduler" -> scheduler;
                         case "getLogger" -> java.util.logging.Logger.getLogger("VaultBackupFixture");
                         case "getName" -> "Spigot";
@@ -147,7 +156,7 @@ public final class DeleteWorkflowTest {
             Class<?> unsafeType=Class.forName("sun.misc.Unsafe");Field uf=unsafeType.getDeclaredField("theUnsafe");uf.setAccessible(true);
             VaultBackupPlugin plugin=(VaultBackupPlugin)unsafeType.getMethod("allocateInstance",Class.class).invoke(uf.get(null),VaultBackupPlugin.class);
             field(plugin,JavaPlugin.class,"server",server);field(plugin,JavaPlugin.class,"isEnabled",true);
-            field(plugin,JavaPlugin.class,"description",new org.bukkit.plugin.PluginDescriptionFile("VaultBackupFixture","1.2.1",VaultBackupPlugin.class.getName()));
+            field(plugin,JavaPlugin.class,"description",new org.bukkit.plugin.PluginDescriptionFile("VaultBackupFixture","1.2.2",VaultBackupPlugin.class.getName()));
             org.bukkit.plugin.PluginLogger logger=new org.bukkit.plugin.PluginLogger(plugin);logger.setUseParentHandlers(false);
             field(plugin,JavaPlugin.class,"logger",logger);
             field(plugin,VaultBackupPlugin.class,"settings",settings);field(plugin,VaultBackupPlugin.class,"engine",engine);
@@ -155,6 +164,10 @@ public final class DeleteWorkflowTest {
             AtomicBoolean busy=new AtomicBoolean(),cancelled=new AtomicBoolean();
             field(plugin,VaultBackupPlugin.class,"busy",busy);field(plugin,VaultBackupPlugin.class,"cancelled",cancelled);
             field(plugin,VaultBackupPlugin.class,"operation","operation.idle");field(plugin,VaultBackupPlugin.class,"progress","Ready");
+            // allocateInstance skips field initializers; supply the plugin's initial state explicitly.
+            field(plugin,VaultBackupPlugin.class,"rejectedBackups",Map.of());
+            field(plugin,VaultBackupPlugin.class,"reportedRejected",java.util.concurrent.ConcurrentHashMap.newKeySet());
+            field(plugin,VaultBackupPlugin.class,"pendingCancel",new java.util.concurrent.atomic.AtomicReference<CommandSender>());
             Set<String> permissions=new HashSet<>(List.of("vaultbackup.delete","vaultbackup.restore","vaultbackup.list","vaultbackup.status"));
             List<String> messages=new ArrayList<>();
             CommandSender sender=(CommandSender)Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),new Class<?>[]{CommandSender.class},(p,m,a)->{
@@ -181,7 +194,7 @@ public final class DeleteWorkflowTest {
             check(io.queue.size()==1 && contains(messages,"last verified catalogue") && contains(messages,first.id()),"busy list uses cached catalogue");
             commands.onCommand(sender,null,"backup",new String[]{"status"});
             commands.onCommand(sender,null,"backup",new String[]{"help"});
-            check(contains(messages,"Deleting backup") && contains(messages,"VaultBackup Pro 1.2.1 commands"),"status and help stay readable while busy");
+            check(contains(messages,"Deleting backup") && contains(messages,"VaultBackup Pro 1.2.2 commands"),"status and help stay readable while busy");
             io.runOne();drainMain(main);
             check(!busy.get() && !Files.exists(first.zipPath()) && !Files.exists(first.metadataPath()),"direct delete removes exact archive and metadata");
             check(Files.exists(second.zipPath()) && plugin.backups().size()==1,"other target remains intact");
@@ -219,12 +232,18 @@ public final class DeleteWorkflowTest {
             io.runOne();drainMain(main);
             check(!busy.get() && coordinator.protectedBackupIds().isEmpty() && !Files.exists(state.resolve("active-restore.properties")),"cancelled verification cannot commit");
             field(plugin,VaultBackupPlugin.class,"restoreStatus",new RestoreCoordinator.Status("fixture-job",recreated.id(),"WAITING_FOR_MANUAL_STOP","",state.resolve("restore-jobs/fixture-job/job.properties"),true));
+            messages.clear();commands.onCommand(sender,null,"backup",new String[]{"list"});
+            check(io.queue.isEmpty() && !busy.get() && contains(messages,"A restore is reserved"),"a reserved restore never starts a catalogue re-hash that would block cancellation");
+            busy.set(true);field(plugin,VaultBackupPlugin.class,"operation","operation.catalogue");messages.clear();plugin.cancelRestore(sender);
+            check(cancelled.get() && contains(messages,"cancelled as soon as it stops"),"cancellation pre-empts a running read-only catalogue refresh");
+            busy.set(false);cancelled.set(false);field(plugin,VaultBackupPlugin.class,"operation","operation.idle");
+            field(plugin,VaultBackupPlugin.class,"pendingCancel",new java.util.concurrent.atomic.AtomicReference<CommandSender>());
             messages.clear();commands.onCommand(sender,null,"backup",new String[]{"delete",recreated.id()});
             check(io.queue.isEmpty() && Files.exists(recreated.zipPath()) && contains(messages,"protected for restore"),"plugin direct delete blocks reserved target");
             commands.onCommand(sender,null,"backup",new String[]{"restore",recreated.id()});
             check(io.queue.isEmpty() && contains(messages,"reservation already exists"),"plugin refuses a second reserved restore");
             commands.onCommand(sender,null,"backup",new String[]{"status"});commands.onCommand(sender,null,"backup",new String[]{"help"});
-            check(contains(messages,"fixture-job") && contains(messages,"VaultBackup Pro 1.2.1 commands"),"reserved status and help remain accessible");
+            check(contains(messages,"fixture-job") && contains(messages,"VaultBackup Pro 1.2.2 commands"),"reserved status and help remain accessible");
             field(plugin,VaultBackupPlugin.class,"restoreStatus",null);
             check(commands.onTabComplete(sender,null,"backup",new String[]{"delete",recreated.id(),""}).isEmpty(),"no delete confirmation completion");
             check(commands.onTabComplete(sender,null,"backup",new String[]{"restore",recreated.id(),""}).isEmpty(),"no restore confirmation completion");
@@ -239,7 +258,7 @@ public final class DeleteWorkflowTest {
             String menus=Files.readString(source.resolve("BackupMenus.java")), pluginSource=Files.readString(source.resolve("VaultBackupPlugin.java"));
             sourceCheck(menus.contains("who -> openInfo(who,record.id(),current)"),"list selection only opens details");
             sourceCheck(menus.contains("who.closeInventory(); plugin.requestRestore(who,id);"),"explicit restore action closes old menu and reserves directly");
-            sourceCheck(menus.contains("who.closeInventory(); plugin.delete(who,id);"),"explicit delete action closes old menu and deletes directly");
+            sourceCheck(menus.contains("who.closeInventory(); plugin.delete(who,id,true);"),"explicit delete action closes old menu and deletes directly");
             sourceCheck(!menus.contains("Warning(") && !menus.contains("Final(") && !menus.contains("confirmtwice"),"no warning/final modal routes remain");
             sourceCheck(menus.contains("open.get(player.getUniqueId()) != m") && menus.contains("!plugin.allowed(player,action.permission)"),"queued clicks recheck identity and permission");
             sourceCheck(menus.contains("!event.isLeftClick() || event.isShiftClick()") && menus.contains("ClickType.LEFT"),"non-explicit clicks cannot trigger actions");
@@ -294,6 +313,10 @@ public final class DeleteWorkflowTest {
             check(!Files.exists(guiTarget.zipPath()) && Files.exists(recreated.zipPath()),"GUI deletes only its server-owned selected target");
             click(menusObject,detailView,15,ClickType.LEFT);drainMain(main);
             check(io.queue.isEmpty(),"stale GUI view cannot replay an action");
+            check(openView[0]!=null && openView[0].getTopInventory().getHolder()!=detailView.getTopInventory().getHolder(),"a GUI-started delete returns to the backup list");
+            BackupRecord chatTarget=engine.createBackup("chat-target");field(plugin,VaultBackupPlugin.class,"catalogue",List.of(chatTarget,recreated));
+            player.closeInventory();commands.onCommand(player,null,"backup",new String[]{"delete",chatTarget.id()});io.runOne();drainMain(main);
+            check(!Files.exists(chatTarget.zipPath()) && openView[0]==null,"a chat delete never forces the GUI open");
             menusObject.openList(player,0);click(menusObject,openView[0],0,ClickType.LEFT);drainMain(main);
             detailView=openView[0];
             click(menusObject,detailView,11,ClickType.LEFT);permissions.remove("vaultbackup.restore");drainMain(main);
@@ -319,11 +342,37 @@ public final class DeleteWorkflowTest {
             Files.move(hidden,backup);
             permissions.add("vaultbackup.create");
             field(plugin,VaultBackupPlugin.class,"autosave",new java.util.LinkedHashMap<>());
-            messages.clear();commands.onCommand(sender,null,"backup",new String[]{"create","immediate"});
+            List<java.util.logging.LogRecord> logged=new ArrayList<>();
+            logger.addHandler(new java.util.logging.Handler() {
+                @Override public void publish(java.util.logging.LogRecord record) { logged.add(record); }
+                @Override public void flush() { }
+                @Override public void close() { }
+            });
+            ServerLifecycle.configureLanguage("en_US");
+            saveHandle.fail=true;messages.clear();commands.onCommand(sender,null,"backup",new String[]{"create","immediate"});
             check(contains(messages,"Starting backup. Saving worlds"),"create immediately acknowledges before mandatory save");
             check(!contains(messages,"Saving complete") && !contains(messages,"Backup created:"),"acceptance does not falsely claim saving or backup completion");
             drainMain(main);
             check(!busy.get() && io.queue.isEmpty(),"failed fixture save cannot enqueue compression or leave busy state");
+            check(logged.stream().anyMatch(r->r.getThrown() instanceof IOException e && e.getMessage().contains("successful")),"the abort comes from the unsuccessful world save itself");
+            saveHandle.fail=false;messages.clear();commands.onCommand(sender,null,"backup",new String[]{"create","saved"});
+            check(contains(messages,"Saving complete") && io.queue.size()==1 && busy.get(),"a successful save queues exactly one compression job");
+            io.runOne();drainMain(main);
+            check(!busy.get() && contains(messages,"Backup created:"),"the saved backup completes and releases the worker");
+            lifecycle[0]=new ErrorHandle();messages.clear();
+            try {commands.onCommand(sender,null,"backup",new String[]{"create","error"});throw new AssertionError("a save Error was swallowed");}
+            catch(StackOverflowError expected) {checks++;}
+            Field snapshot=VaultBackupPlugin.class.getDeclaredField("snapshotActive");snapshot.setAccessible(true);
+            check(!busy.get() && io.queue.isEmpty() && !(Boolean)snapshot.get(plugin),"an Error during the world save still restores autosave and releases the worker");
+            lifecycle[0]=saveHandle;
+            messages.clear();plugin.tell(sender,"one\u2028two\u2029three\u0085four",true);
+            check(messages.size()==1,"Unicode line separators inside data never start a new plugin-prefixed line");
+            messages.clear();plugin.tell(sender,"first\nsecond",true);check(messages.size()==2,"template line feeds still separate lines");
+            BackupRecord forged=new BackupRecord(chatTarget.id(),Instant.now(),"x\u00a7aFAKE\u2028[VaultBackup] forged line",chatTarget.zipPath(),chatTarget.metadataPath(),1,1,1,"0".repeat(64));
+            field(plugin,VaultBackupPlugin.class,"catalogue",List.of(forged));busy.set(true);messages.clear();
+            commands.onCommand(sender,null,"backup",new String[]{"list"});busy.set(false);
+            check(messages.stream().filter(m->m.contains("FAKE")).allMatch(m->m.contains("\\u00A7") && m.indexOf('\u2028')<0) && messages.stream().anyMatch(m->m.contains("FAKE")),
+                    "stored labels cannot restyle or split plugin chat lines");
             sourceCheck(pluginSource.indexOf("RestoreCoordinator.start(") < pluginSource.indexOf("engine = new BackupEngine(settings.options())")
                     && !pluginSource.contains("createPrivateDirectories(settings.backupDirectory())"),"root guard precedes archive directory setup");
             System.out.println("PASS DeleteWorkflowTest ("+checks+" executed checks; "+sourceChecks+" source-only GUI wiring checks; includes simulated Bukkit events, no real client or helper launch)");

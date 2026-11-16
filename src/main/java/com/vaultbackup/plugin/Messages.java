@@ -36,6 +36,8 @@ final class Messages {
         }
         return m.appendTail(result).toString();
     }
+    /** Archive- and sidecar-derived text for chat, console and lore: no codes, breaks or controls. */
+    static String safe(String value) { return com.vaultbackup.core.BackupEngine.printable(value); }
     static String phase(String language, String raw) {
         if (raw == null || raw.isBlank()) return text(language, "progress.ready");
         return switch (raw) {
@@ -48,7 +50,7 @@ final class Messages {
                         {"Retention deleted ", "progress.retention"}, {"Verifying ", "progress.verify"}};
                 String translated = null;
                 for (String[] phase : phases) if (raw.startsWith(phase[0])) {
-                    translated = text(language, phase[1], raw.substring(phase[0].length())); break;
+                    translated = text(language, phase[1], safe(raw.substring(phase[0].length()))); break;
                 }
                 yield translated == null ? text(language, "progress.working") : translated;
             }

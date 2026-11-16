@@ -24,6 +24,13 @@ public final class RestoreStartupTest {
             return;
         }
         if(args[0].equals("--sleep")) {Thread.sleep(60000);return;}
+        if(args[0].equals("--hold-helper-lock")) {
+            // A helper that holds helper.lock but has not recorded its process identity yet.
+            try(FileChannel c=FileChannel.open(Path.of(args[1]).resolve("helper.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE);FileLock lock=c.lock()) {
+                Files.createFile(Path.of(args[1]).resolve("helper-lock-held"));Thread.sleep(60000);
+            }
+            return;
+        }
         if(args[0].equals("--cooperate")) {
             Path dir=Path.of(args[1]);Properties job=RestoreFiles.load(dir.resolve("job.properties"));
             try(RestoreJobState.Gate gate=RestoreJobState.requireLock(dir)) {RestoreJobState.recordProcess(dir,job,ProcessHandle.current());}
@@ -58,6 +65,8 @@ public final class RestoreStartupTest {
         loggerRouting(base.resolve("logger"));reloadCollision(base.resolve("reload"));
         recoveryReceipts(base.resolve("recovery-receipts"));stagedAcknowledgmentReplay(base.resolve("staged-ack"));
         ordinaryStorageFailure(base.resolve("storage"));unauthenticatedHelper(base.resolve("helper-auth"));
+        lockedUnrecordedHelper(base.resolve("locked-unrecorded"));reusedHelperPid(base.resolve("reused-helper"));
+        foreignStateDirectory(base.resolve("foreign-state"));successWithoutRollback(base.resolve("success-without-rollback"));
         System.out.println("RestoreStartupTest: "+checks+" checks passed; disposable fixtures at "+base);
     }
     private static Fixture fixture(Path base,String status)throws Exception {
@@ -113,9 +122,64 @@ public final class RestoreStartupTest {
         } finally {kill(p);}
     }
     private static void missingIdentity(Path base)throws Exception {
+        // A crash between publishing the reservation and recording the launch: no identity, and
+        // no process holds helper.lock, which every helper takes before its first job-gate check.
         Fixture f=fixture(base,"COMMITTED");var result=start(f);
-        check(result.disposition()==RestoreCoordinator.StartupDisposition.GUARDED_DEGRADED,"missing helper identity is never presumed unlaunched or dead");
-        check(!Files.exists(f.dir.resolve("cancel-ack.properties")) && Files.exists(f.state.resolve("active-restore.properties")),"unknown helper retains journal without false acknowledgment");guardHeld(f);
+        check(result.disposition()==RestoreCoordinator.StartupDisposition.READY,"an uncontended helper.lock proves no helper is alive, so startup is not degraded forever");
+        check(RestoreJobState.acknowledged(f.dir,f.job) && RestoreFiles.load(f.dir.resolve("cancel-ack.properties")).getProperty("source").equals("CONFIRMED_HELPER_DEATH"),"the proof is recorded as authenticated helper death, never as NOT_LAUNCHED");
+        check(!Files.exists(f.state.resolve("active-restore.properties")),"the stale reservation is disarmed");unchanged(f);guardHeld(f);
+        Process retry=helper(f);check(retry.waitFor(10,TimeUnit.SECONDS) && retry.exitValue()==3,"a helper started later sees the tombstone and never restores");
+    }
+    private static void lockedUnrecordedHelper(Path base)throws Exception {
+        Fixture f=fixture(base,"COMMITTED");Process holder=spawn("--hold-helper-lock",f.dir.toString());
+        try {
+            await(f.dir.resolve("helper-lock-held"));var result=start(f);
+            check(result.disposition()==RestoreCoordinator.StartupDisposition.GUARDED_DEGRADED,"a held helper.lock without a recorded identity is never presumed dead");
+            check(!Files.exists(f.dir.resolve("cancel-ack.properties")) && Files.exists(f.state.resolve("active-restore.properties")),"a possibly live helper keeps the journal");guardHeld(f);
+        } finally {kill(holder);}
+    }
+    private static void reusedHelperPid(Path base)throws Exception {
+        Fixture f=fixture(base,"WAITING_FOR_MANUAL_STOP");Process other=spawn("--sleep");
+        try {
+            // The recorded helper started long ago; its PID now names a process started much later.
+            Properties process=new Properties();process.setProperty("jobId",f.job.getProperty("jobId"));process.setProperty("pid",Long.toString(other.pid()));
+            process.setProperty("startedAt",Instant.now().minus(Duration.ofDays(1)).toString());
+            process.setProperty("authentication",RestoreFiles.hmac(f.job.getProperty("nonce"),String.join("\n",process.getProperty("jobId"),process.getProperty("pid"),process.getProperty("startedAt"))));
+            RestoreFiles.write(f.dir.resolve("helper-process.properties"),process);
+            var result=start(f);check(result.disposition()==RestoreCoordinator.StartupDisposition.READY,"a reused helper PID does not keep VaultBackup disabled");
+            check(RestoreJobState.acknowledged(f.dir,f.job),"the reused-PID proof is an authenticated acknowledgment");unchanged(f);guardHeld(f);
+        } finally {kill(other);}
+    }
+    private static void foreignStateDirectory(Path base)throws Exception {
+        Fixture lobby=fixture(base.resolve("lobby"),"WAITING_FOR_MANUAL_STOP");
+        Path sibling=Files.createDirectories(base.resolve("sibling-server"));
+        var conflict=RestoreCoordinator.start(sibling,lobby.backups,lobby.state,helper,"en",message -> {});
+        check(conflict.disposition()==RestoreCoordinator.StartupDisposition.CONFIG_CONFLICT,"a sibling sharing another server's pending state directory is a configuration conflict, not a shutdown");
+        check(conflict.message().contains("belongs to another server root") && !Files.exists(lobby.dir.resolve("cancel.properties")),"the other server's reservation is never touched");
+        Fixture owned=fixture(base.resolve("owned"),"COMMITTED");Files.delete(owned.state.resolve("active-restore.properties"));
+        check(start(owned).disposition()==RestoreCoordinator.StartupDisposition.READY,"the owning server claims its state directory");
+        check(Files.isRegularFile(owned.state.resolve(".vaultbackup-owner.properties")),"the claim is recorded");
+        Path other=Files.createDirectories(base.resolve("owned-sibling"));
+        var claimed=RestoreCoordinator.start(other,owned.backups,owned.state,helper,"en",message -> {});
+        check(claimed.disposition()==RestoreCoordinator.StartupDisposition.CONFIG_CONFLICT,"a claimed state directory refuses another server root");
+        refuses(()->claimed.coordinator().reserve("snapshot",owned.backups.resolve("snapshot.zip"),RestoreFiles.sha(owned.backups.resolve("snapshot.zip")),Duration.ofMinutes(1)),"a conflicting coordinator never reserves");
+    }
+    private static void successWithoutRollback(Path base)throws Exception {
+        Fixture f=fixture(base,"COMMITTED");Path rollback=Path.of(f.job.getProperty("rollback"));
+        Files.move(f.root,rollback);Files.createDirectory(f.root);Files.writeString(f.root.resolve("restored"),"BACKUP");
+        Properties receipt=new Properties();
+        for(String key:List.of("jobId","backupId","serverRoot","archiveSha256","manifestSha256"))receipt.setProperty(key,f.job.getProperty(key));
+        receipt.setProperty("completedAt",Instant.now().toString());receipt.setProperty("rollbackDirectory",rollback.toString());
+        receipt.setProperty("authentication",RestoreFiles.hmac(f.job.getProperty("nonce"),RestoreFiles.receiptPayload(receipt)));
+        RestoreFiles.write(f.dir.resolve("receipt.properties"),receipt);RestoreFiles.status(f.dir,"SUCCESS","fixture verified install");
+        Process dead=sleeper(f);kill(dead);
+        // The administrator removed the preserved original after checking the restore.
+        try(var paths=Files.walk(rollback)) {for(Path path:paths.sorted(Comparator.reverseOrder()).toList())Files.delete(path);}
+        List<String> logs=new ArrayList<>();
+        var result=RestoreCoordinator.start(f.root,f.backups,f.state,helper,"en",logs::add);
+        check(result.disposition()==RestoreCoordinator.StartupDisposition.READY,"a verified restore whose rollback was removed still starts");
+        check(result.coordinator().consumeVerifiedReceipt().isPresent() && !Files.exists(f.state.resolve("active-restore.properties")),"the authenticated receipt is consumed once");
+        check(logs.stream().anyMatch(line->line.contains("no longer exists")),"the missing original copy is logged");
     }
     private static void malformedJournals(Path base)throws Exception {
         Fixture missing=fixture(base.resolve("missing-status"),"COMMITTED");Files.delete(missing.dir.resolve("status.properties"));hard(start(missing),missing,"missing status is hard conflict, never default COMMITTED");
@@ -147,7 +211,8 @@ public final class RestoreStartupTest {
         check(Files.exists(acknowledgment.state.resolve("active-restore.properties")),"failed acknowledgment retains active journal");guardHeld(acknowledgment);
     }
     private static void retainedLease(Path base)throws Exception {
-        Fixture f=fixture(base,"WAITING_FOR_MANUAL_STOP");Process server=spawn("--hold-degraded",base.toString(),helper.toString());
+        // A live recorded helper keeps the stale job unresolved, so startup stays degraded.
+        Fixture f=fixture(base,"WAITING_FOR_MANUAL_STOP");Process live=sleeper(f);Process server=spawn("--hold-degraded",base.toString(),helper.toString());
         try {
             await(base.resolve("degraded-ready"));guardHeld(f);
             Files.createFile(base.resolve("exit-request"));await(base.resolve("shutdown-hook"));
@@ -157,7 +222,7 @@ public final class RestoreStartupTest {
                 check(lock!=null,"root guard becomes available only after real JVM exit");
             }
             unchanged(f);
-        } finally {kill(server);}
+        } finally {kill(server);kill(live);}
     }
     private static void loggerRouting(Path base)throws Exception {
         Fixture f=fixture(base,"COMMITTED");Files.delete(f.state.resolve("active-restore.properties"));

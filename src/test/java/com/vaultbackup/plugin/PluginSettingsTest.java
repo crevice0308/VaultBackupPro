@@ -90,7 +90,17 @@ public final class PluginSettingsTest {
    if(PluginSettings.from(legacySettings).confirmationSeconds()!=60)throw new AssertionError("legacy TTL affects direct operation");checks++;
   }
   var missingRoot=base();Path absent=base.resolve("not-created-server");missingRoot.set("storage.server-root",absent.toString());
-  if(!PluginSettings.from(missingRoot).serverRoot().equals(absent)||Files.exists(absent))throw new AssertionError("missing root not deferred safely");checks++;
+  if(!PluginSettings.from(missingRoot).serverRoot().equals(base.toRealPath().resolve("not-created-server"))||Files.exists(absent))throw new AssertionError("missing root not deferred safely");checks++;
+  // A server root reached through a symlinked ancestor is canonicalized: containment checks compare
+  // real paths, and the restore guard (which refuses symlink components) can still be acquired.
+  Path linkedParent=base.resolve("linked-parent");Files.createSymbolicLink(linkedParent,base);
+  var viaLink=base();viaLink.set("storage.server-root",linkedParent.resolve("server").toString());
+  var canonical=PluginSettings.from(viaLink);
+  if(!canonical.serverRoot().equals(root.toRealPath()))throw new AssertionError("symlinked ancestor not canonicalized: "+canonical.serverRoot());checks++;
+  var insideViaLink=base();insideViaLink.set("storage.server-root",linkedParent.resolve("server").toString());insideViaLink.set("storage.backup-directory","inside-backups");
+  try{PluginSettings.from(insideViaLink);throw new AssertionError("backup directory inside the real root accepted");}catch(IllegalArgumentException expected){checks++;}
+  var guarded=com.vaultbackup.restore.RestoreCoordinator.start(canonical.serverRoot(),canonical.backupDirectory(),canonical.stateDirectory(),canonical.helperJar(),"en",message->{});
+  if(guarded.disposition()!=com.vaultbackup.restore.RestoreCoordinator.StartupDisposition.READY)throw new AssertionError("symlinked ancestor stopped startup: "+guarded.message());checks++;
   var changed=base();changed.set("automatic.enabled",false);changed.set("automatic.interval-minutes",5);changed.set("language","en_US");
   if(!VaultBackupPlugin.safeReservedSettings(s,PluginSettings.from(changed)))throw new AssertionError("safe reserved settings rejected");checks++;
   for(var entry:Map.<String,Object>of("retention.max-count",21,"retention.max-bytes",1L,"backup.compression-level",3,

@@ -45,6 +45,9 @@ public final class RestoreSafetyTest {
             rollbackJournalFailureTest(temp.resolve("malformed-journal"),"ORIGINAL_MOVED",false,true);
             rollbackJournalFailureTest(temp.resolve("blocked-malformed-journal"),"ORIGINAL_MOVED",true,true);
             recoveryTest(temp.resolve("recovery"));
+            reusedParentPidTest(temp.resolve("reused-parent"));
+            recoverWithoutRollbackTest(temp.resolve("recover-without-rollback"));
+            stagingFailureTest(temp.resolve("staging-failures"));
             System.out.println("RestoreSafetyTest: "+checks+" checks passed; disposable fixtures at "+temp);
         }catch(Throwable e){System.err.println("Test fixtures retained at "+temp);throw e;}
     }
@@ -52,6 +55,12 @@ public final class RestoreSafetyTest {
     private interface Throwing {void run()throws Exception;}
     private static void refuses(Throwing action,String message)throws Exception {
         try{action.run();}catch(IOException e){checks++;return;}throw new AssertionError(message);
+    }
+    /** Like refuses(), but the refusal must carry the expected reason, not any I/O failure. */
+    private static void refusesWith(Throwing action,String reason,String message)throws Exception {
+        try{action.run();}
+        catch(IOException e){if(String.valueOf(e.getMessage()).contains(reason)){checks++;return;}throw new AssertionError(message+": refused for another reason",e);}
+        throw new AssertionError(message);
     }
     private static void archiveTests(Path dir)throws Exception {
         Files.createDirectories(dir);Path archive=dir.resolve("good.zip");
@@ -71,8 +80,25 @@ public final class RestoreSafetyTest {
         refuses(()->RestoreArchive.verify(conflict,RestoreFiles.sha(conflict)),"implicit ancestor file conflict must fail");
         Path unicode=dir.resolve("unicode.zip");zip(unicode,Map.of("é/a","a","e\u0301/b","b"),List.of());
         refuses(()->RestoreArchive.verify(unicode,RestoreFiles.sha(unicode)),"implicit Unicode aliases must fail");
+        for(String device:List.of("CON.txt","COM\u00b9","LPT0.log","CONIN$","conout$.txt","CON .txt","a:b","trailing."))
+            refuses(()->RestoreArchive.validatePath(device,true),"Windows device or reserved name must fail on Windows: "+device);
         Path special=dir.resolve("special.zip");zip(special,Map.of("CON.txt","bad"),List.of());
-        refuses(()->RestoreArchive.verify(special,RestoreFiles.sha(special)),"Windows devices must fail");
+        if(RestoreArchive.WINDOWS)refuses(()->RestoreArchive.verify(special,RestoreFiles.sha(special)),"Windows devices must fail");
+        else check(RestoreArchive.verify(special,RestoreFiles.sha(special)).entries().size()==1,"Windows-only names restore on other platforms");
+        Path lossy=dir.resolve("lossy.zip");zip(lossy,Map.of("caf\uFFFD.txt","lossy"),List.of());
+        refusesWith(()->RestoreArchive.verify(lossy,RestoreFiles.sha(lossy)),"losslessly","names archived lossily cannot be reserved");
+        Files.writeString(stage.resolve("world/level.dat"),"BACKUP");RestoreArchive.verifyInstalled(stage,verified);checks++;
+        Path extra=Files.createDirectory(stage.resolve("unexpected"));refusesWith(()->RestoreArchive.verifyInstalled(stage,verified),"Unexpected installed directory","an unexpected installed directory fails verification");Files.delete(extra);
+        Files.delete(stage.resolve("empty"));refusesWith(()->RestoreArchive.verifyInstalled(stage,verified),"incomplete","a missing archived directory fails verification");
+        StringBuilder deep=new StringBuilder("VAULTBACKUP-MANIFEST\t1\n");Path deepArchive=dir.resolve("deep.zip");String emptyHash=HexFormat.of().formatHex(RestoreFiles.digest().digest(new byte[0]));
+        try(ZipOutputStream zip=new ZipOutputStream(Files.newOutputStream(deepArchive))) {
+            for(int i=0;i<200;i++) {
+                String name=String.format(Locale.ROOT,"u%05d",i)+"/a".repeat(1900)+"/f";
+                zip.putNextEntry(new ZipEntry(name));zip.closeEntry();deep.append("F\t0\t").append(emptyHash).append('\t').append(encoded(name)).append('\n');
+            }
+            zip.putNextEntry(new ZipEntry(RestoreArchive.MANIFEST));zip.write(deep.toString().getBytes(StandardCharsets.UTF_8));zip.closeEntry();
+        }
+        check(RestoreArchive.verify(deepArchive,RestoreFiles.sha(deepArchive)).entries().size()==200,"deep manifest paths verify in linear memory");
         Path missing=dir.resolve("missing.zip");try(ZipOutputStream out=new ZipOutputStream(Files.newOutputStream(missing))){out.putNextEntry(new ZipEntry("x"));out.write(1);out.closeEntry();}
         refuses(()->RestoreArchive.verify(missing,RestoreFiles.sha(missing)),"manifest required");
     }
@@ -89,12 +115,16 @@ public final class RestoreSafetyTest {
             check(Files.getPosixFilePermissions(newBackups).equals(privateMode),"new backup directory is owner-only");
             check(Files.getPosixFilePermissions(newState.resolve("restore-jobs")).equals(privateMode),"new job container is owner-only");
         }catch(UnsupportedOperationException ignored){}
-        Path archive=backups.resolve("test.zip");zip(archive,Map.of("file","backup"),List.of());
-        Properties job=manualJob(root,backups,state,archive,ProcessHandle.current().pid(),ProcessHandle.current().info().startInstant().orElseThrow());
+        // The refusals above leaked lifetime leases on that root, which would also refuse the checks
+        // below. Use a fresh root and state, so each refusal comes from the parent-identity check.
+        Path liveRoot=Files.createDirectory(fixture.resolve("live-server")),liveBackups=Files.createDirectory(fixture.resolve("live-backups")),liveState=Files.createDirectory(fixture.resolve("live-state"));
+        Path archive=liveBackups.resolve("test.zip");zip(archive,Map.of("file","backup"),List.of());
+        Properties job=manualJob(liveRoot,liveBackups,liveState,archive,ProcessHandle.current().pid(),ProcessHandle.current().info().startInstant().orElseThrow());
         Path jobFile=Path.of(job.getProperty("jobFile"));
-        refuses(()->RestoreMain.run(new String[]{"--job",jobFile.toString(),"--manual","--i-confirm-server-stopped"}),"manual confirmation cannot override live JVM");
+        refusesWith(()->RestoreMain.run(new String[]{"--job",jobFile.toString(),"--manual","--i-confirm-server-stopped"}),"still alive","manual confirmation cannot override live JVM");
         Properties persisted=RestoreFiles.load(jobFile);persisted.setProperty("parentStartedAt",Instant.now().minusSeconds(86400).toString());RestoreFiles.write(jobFile,persisted);
-        refuses(()->RestoreMain.run(new String[]{"--job",jobFile.toString(),"--manual","--i-confirm-server-stopped"}),"PID reuse/start mismatch must fail closed");
+        refusesWith(()->RestoreMain.run(new String[]{"--job",jobFile.toString(),"--manual","--i-confirm-server-stopped"}),"uncertain or reused","PID reuse/start mismatch must fail closed");
+        check(!Files.exists(Path.of(persisted.getProperty("stage"))) && !Files.exists(Path.of(persisted.getProperty("rollback"))),"refused identity never stages or moves the root");
         refuses(()->RestoreMain.run(new String[]{"--job",jobFile.toString(),"--manual"}),"manual helper requires explicit stopped confirmation");
     }
     /** Helper fixture deliberately makes the post-spawn status unreadable. No server files touched. */
@@ -150,6 +180,11 @@ public final class RestoreSafetyTest {
             check(!job.containsKey("automaticDeadline"),"manual-stop reservation has no automatic expiry");
             check(job.getProperty("formatVersion").equals("2"),"manual-stop protocol version is persisted");
             check(statusEquals(jobDir,"WAITING_FOR_MANUAL_STOP"),"status is waiting for manual stop");
+            check(Arrays.equals(Files.readAllBytes(jobDir.resolve("helper.jar")),Files.readAllBytes(helperJar)),"the helper runs from a private copy of the verified bytes");
+            try {check(Files.getPosixFilePermissions(jobDir.resolve("helper.jar")).equals(java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")),"the private helper copy is owner-only");} catch(UnsupportedOperationException ignored) {}
+            long helperPid=Long.parseLong(RestoreFiles.load(jobDir.resolve("helper-process.properties")).getProperty("pid"));
+            if(Files.isExecutable(Path.of("/usr/bin/setsid")) || Files.isExecutable(Path.of("/bin/setsid")))
+                check(session(helperPid)!=-1 && session(helperPid)!=session(parent.pid()),"the helper leaves the server's terminal session");
             Thread.sleep(400);check(Files.readString(root.resolve("world/level.dat")).equals("ORIGINAL-CURRENT"),"live JVM data unchanged");check(!Files.exists(Path.of(job.getProperty("stage"))),"no staging before actual JVM exit");
             try(FileChannel guard=FileChannel.open(fixture.resolve("state").resolve(RestoreFiles.guardName(root)),StandardOpenOption.WRITE)) {FileLock lock=guard.tryLock();check(lock==null,"parent lifetime guard is held");if(lock!=null)lock.release();}
             if(forceReceiptFailure)Files.createDirectory(jobDir.resolve("receipt.properties"));
@@ -252,6 +287,71 @@ public final class RestoreSafetyTest {
         check(RestoreMain.run(new String[]{"--job",jobFile.toString(),"--recover","--i-confirm-server-stopped"})==0,"explicit stopped recovery succeeds");
         check(Files.readString(root.resolve("original")).equals("original"),"crash recovery restores original");check(Files.exists(stage.resolve("new")),"crash recovery preserves stage");check(!Files.exists(jobFile.getParent().resolve("receipt.properties")),"recovery does not claim restore success");
         check(RestoreJobState.verifiedRecovery(jobFile.getParent(),stored).getProperty("outcome").equals("RECOVERED"),"explicit physical recovery emits authenticated completion receipt");
+    }
+
+    /** A PID that now names a process started after the job existed must not block a stopped-server restore. */
+    private static void reusedParentPidTest(Path f)throws Exception {
+        Path root=fixture(f),archive=f.resolve("backups/snapshot.zip"),state=f.resolve("state");
+        Process other=spawn("--sleeper");
+        try {
+            Instant longAgo=Instant.now().minus(Duration.ofDays(1));
+            Path file=Path.of(manualJob(root,f.resolve("backups"),state,archive,other.pid(),longAgo).getProperty("jobFile"));
+            Properties job=RestoreFiles.load(file);job.setProperty("createdAt",longAgo.toString());RestoreFiles.write(file,job);
+            check(RestoreMain.run(new String[]{"--job",file.toString(),"--manual","--i-confirm-server-stopped"})==0,"a reused parent PID is decided under the root guard");
+            check(statusEquals(file.getParent(),"SUCCESS") && Files.readString(root.resolve("world/level.dat")).equals("BACKUP"),"the stopped-server restore completes");
+        } finally {other.destroyForcibly();other.waitFor();}
+    }
+    /** The rename back completed, but the journal write after it was lost: --recover must still resolve the job. */
+    private static void recoverWithoutRollbackTest(Path base)throws Exception {
+        for(String status:List.of("MOVING_ORIGINAL","ORIGINAL_MOVED","INSTALLING","VERIFYING_INSTALLED","ROLLING_BACK","RECOVERY_REQUIRED")) {
+            Path f=base.resolve(status);Path root=fixture(f),archive=f.resolve("backups/snapshot.zip"),state=f.resolve("state");
+            Process dead=spawn("--sleeper");long pid=dead.pid();Instant start=dead.info().startInstant().orElseThrow();dead.destroyForcibly();dead.waitFor();
+            Path file=Path.of(manualJob(root,f.resolve("backups"),state,archive,pid,start).getProperty("jobFile"));Properties job=RestoreFiles.load(file);
+            boolean installed=status.equals("VERIFYING_INSTALLED") || status.equals("RECOVERY_REQUIRED");
+            Path evidence=Files.createDirectory(Path.of(job.getProperty(installed?"failed":"stage")));Files.writeString(evidence.resolve("marker"),"archive tree");
+            RestoreFiles.status(file.getParent(),status,"simulated lost journal write after the rename back");
+            check(RestoreMain.run(new String[]{"--job",file.toString(),"--recover","--i-confirm-server-stopped"})==0,"recover resolves "+status+" with the original root in place");
+            check(RestoreJobState.verifiedRecovery(file.getParent(),job).getProperty("outcome").equals("RECOVERED"),"recovery of "+status+" is authenticated");
+            check(Files.readString(root.resolve("world/level.dat")).equals("ORIGINAL") && Files.exists(evidence.resolve("marker")),"recovery of "+status+" changes no data");
+        }
+        Path f=base.resolve("unprovable");Path root=fixture(f),archive=f.resolve("backups/snapshot.zip"),state=f.resolve("state");
+        Process dead=spawn("--sleeper");long pid=dead.pid();Instant start=dead.info().startInstant().orElseThrow();dead.destroyForcibly();dead.waitFor();
+        Path file=Path.of(manualJob(root,f.resolve("backups"),state,archive,pid,start).getProperty("jobFile"));
+        RestoreFiles.status(file.getParent(),"ROLLING_BACK","no stage or failed tree accounts for the archive");
+        refusesWith(()->RestoreMain.run(new String[]{"--job",file.toString(),"--recover","--i-confirm-server-stopped"}),"Cannot prove","recover still refuses when the root may be the installed tree");
+    }
+    /** Failures before any rename keep the original root, free the partial stage and explain why. */
+    private static void stagingFailureTest(Path base)throws Exception {
+        Path f=base.resolve("space");Path root=fixture(f);Path file=deadParentJob(f);
+        Properties job=RestoreFiles.load(file);job.setProperty("totalBytes",Long.toString(Long.MAX_VALUE/4));RestoreFiles.write(file,job);
+        refusesWith(()->RestoreMain.run(new String[]{"--job",file.toString(),"--manual","--i-confirm-server-stopped"}),"Not enough free space","staging needs room for the whole expanded archive");
+        check(statusEquals(file.getParent(),"FAILED_BEFORE_SWAP") && !Files.exists(Path.of(job.getProperty("stage"))),"a refused stage is never created");
+        check(Files.readString(root.resolve("world/level.dat")).equals("ORIGINAL"),"free-space refusal leaves the root untouched");
+
+        Path g=base.resolve("partial");Path groot=fixture(g);Path gfile=deadParentJob(g);Properties gjob=RestoreFiles.load(gfile);
+        zip(g.resolve("backups/snapshot.zip"),Map.of("world/level.dat","REPLACED AFTER RESERVATION"),List.of());
+        refuses(()->RestoreMain.run(new String[]{"--job",gfile.toString(),"--manual","--i-confirm-server-stopped"}),"a changed archive fails before the swap");
+        check(statusEquals(gfile.getParent(),"FAILED_BEFORE_SWAP") && !Files.exists(Path.of(gjob.getProperty("stage"))),"a partial stage is removed after a pre-swap failure");
+        check(RestoreFiles.load(gfile.getParent().resolve("status.properties")).getProperty("message").contains("Partial stage removed"),"the journal says the partial stage was removed");
+        check(Files.readString(groot.resolve("world/level.dat")).equals("ORIGINAL"),"pre-swap failure leaves the root untouched");
+
+        Path h=base.resolve("encoding");fixture(h);Path hfile=deadParentJob(h);Properties hjob=RestoreFiles.load(hfile);
+        hjob.setProperty("fileNameEncoding","X-VAULTBACKUP-OTHER-LOCALE");RestoreFiles.write(hfile,hjob);
+        if(!RestoreArchive.WINDOWS) {
+            refusesWith(()->RestoreMain.run(new String[]{"--job",hfile.toString(),"--manual","--i-confirm-server-stopped"}),"file-name encoding","a helper in another locale refuses before staging");
+            check(!Files.exists(Path.of(hjob.getProperty("stage"))),"an encoding refusal creates no stage");
+        }
+    }
+    private static Path deadParentJob(Path f)throws Exception {
+        Process dead=spawn("--sleeper");long pid=dead.pid();Instant start=dead.info().startInstant().orElseThrow();dead.destroyForcibly();dead.waitFor();
+        return Path.of(manualJob(f.resolve("server"),f.resolve("backups"),f.resolve("state"),f.resolve("backups/snapshot.zip"),pid,start).getProperty("jobFile"));
+    }
+    /** Linux /proc session ID, or -1 where unavailable. */
+    private static long session(long pid) {
+        try {
+            String stat=Files.readString(Path.of("/proc",Long.toString(pid),"stat"));
+            String[] fields=stat.substring(stat.lastIndexOf(')')+2).split(" ");return Long.parseLong(fields[3]);
+        } catch(IOException | RuntimeException unavailable) {return -1;}
     }
     private static Properties manualJob(Path root,Path backups,Path state,Path archive,long pid,Instant start)throws Exception {
         String id=UUID.randomUUID().toString();Path dir=state.resolve("restore-jobs").resolve(id);Files.createDirectories(dir);var verified=RestoreArchive.verify(archive,RestoreFiles.sha(archive));Properties p=new Properties();

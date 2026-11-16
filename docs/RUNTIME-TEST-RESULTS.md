@@ -1,6 +1,6 @@
 # VaultBackup Pro 1.2.0 runtime results
 
-> These real-server results belong to the 1.2.0 final JAR listed below. They were not re-run for 1.2.1; see TEST-RESULTS.md for the 1.2.1 build and isolated test results.
+> These real-server results belong to the 1.2.0 final JAR listed below. They were not re-run for 1.2.1 or 1.2.2; see TEST-RESULTS.md for the 1.2.2 build and isolated test results.
 
 Prerelease test distribution. Tested on 2026-10-13 UTC with Temurin JDK 25.0.4.1+1.
 

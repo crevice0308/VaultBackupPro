@@ -6,9 +6,11 @@ Linux: `./gradlew clean release check`
 
 Windows: `gradlew.bat clean release check`
 
+`check` の obfuscationTest は Python 3 を使います。既定のコマンドは Linux/macOS では `python3`、Windows では `py -3`（Python ランチャー）です。別のコマンドを使う場合は `-Ppython=<コマンド>` を指定してください（例: `gradlew.bat clean release check -Ppython=python`）。リポジトリの `.gitattributes` により、どの環境で取得しても埋め込みリソースの改行は LF に固定されます（Windows の `.cmd`/`.bat` だけ CRLF）。公開ハッシュとの一致は Linux（CI）でのビルドで確認しています。
+
 ## 生成物
-- build/libs/VaultBackupPro-1.2.1.jar — 難読化したプラグイン。独立ヘルパーを内蔵
-- build/libs/vaultbackup-restore-1.2.1.jar — 難読化した独立復元ヘルパー
+- build/libs/VaultBackupPro-1.2.2.jar — 難読化したプラグイン。独立ヘルパーを内蔵
+- build/libs/vaultbackup-restore-1.2.2.jar — 難読化した独立復元ヘルパー
 
 この改訂では ProGuard 7.10.0 でシンボルを難読化します。縮小・最適化は行いません。公開ソースと .pro 設定からビルドできます。難読化はソースを秘匿するものではありません。API は compileOnly で、サーバー API や Minecraft/Spigot サーバー本体を JAR に同梱しません。JAR 内の順序・タイムスタンプは再現しやすい設定です。実際の配布物はテスト結果の SHA-256 と照合してください。
 
@@ -25,7 +27,7 @@ check は上記の独立 Java assertion harness を実行します。JUnit の t
 実サーバー検証には、別途公式サーバー配布物/Spigot BuildTools と Minecraft EULA 同意が必要です。配布 ZIP にサーバー本体、テスト用ワールド、実バックアップ、依存キャッシュは含めません。
 
 ## 配布準備
-`python3 tools/package_release.py <output-directory>` で、ソースとビルド手順を含む完全パッケージ、実行用パッケージ、単独 JAR を整理します。GPLv3 と NOTICE.txt の対応ソース提供条件を確認してください。パッケージ生成自体は公開・アップロード・販売を行いません。
+`python3 tools/package_release.py <output-directory>` で、ソースとビルド手順を含む完全パッケージ、実行用パッケージ、単独 JAR を整理します。版数は plugin.yml から読み取り、build.gradle・復元ラッパー・release/SHA256SUMS.txt と一致しない場合や、試験済みのハッシュと異なる JAR は拒否します（`python -O` でも検査は無効になりません）。GPLv3 と NOTICE.txt の対応ソース提供条件を確認してください。パッケージ生成自体は公開・アップロード・販売を行いません。
 
 ## ビルド供給網と難読化 / Build security and obfuscation
 

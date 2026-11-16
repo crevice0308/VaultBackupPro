@@ -13,6 +13,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -45,6 +47,11 @@ public final class BackupEngine {
     private static final Pattern ABANDONED_PART = Pattern.compile("\\.[0-9]{8}T[0-9]{9}Z-[a-f0-9]{12}\\.(?:zip|properties)\\.part");
     private static final Pattern HASH = Pattern.compile("[0-9a-f]{64}");
     private static final DateTimeFormatter ID_TIME = DateTimeFormatter.ofPattern("uuuuMMdd'T'HHmmssSSS'Z'").withZone(ZoneOffset.UTC);
+    /** Binds a backup store to exactly one server root; never listed as a backup (no ID name). */
+    public static final String OWNER_MARKER = ".vaultbackup-owner.properties";
+    /** Windows-only name rules apply where the archive can be materialized on Windows. */
+    private static final boolean WINDOWS = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+    private static final Pattern DEVICE = Pattern.compile("CON|PRN|AUX|NUL|CONIN\\$|CONOUT\\$|COM[0-9\u00b9\u00b2\u00b3]|LPT[0-9\u00b9\u00b2\u00b3]");
     private static final BooleanSupplier NEVER_CANCEL = () -> false;
     private static final Consumer<String> NO_PROGRESS = value -> { };
     private final BackupOptions options;
@@ -66,6 +73,8 @@ public final class BackupEngine {
      * Explicit verify() and revalidateBackups() always re-read every byte. Guarded by this.
      */
     private final Map<String, VerifiedArchive> verifiedArchives = new HashMap<>();
+    /** Archives the latest catalogue pass could not verify, with a printable reason. Guarded by this. */
+    private final Map<String, String> rejected = new LinkedHashMap<>();
 
     public BackupEngine(BackupOptions options) throws IOException {
         this.options = Objects.requireNonNull(options);
@@ -77,6 +86,57 @@ public final class BackupEngine {
         if (destination.equals(state)) throw new IOException("Backup and state directories must differ");
         includes = compileGlobs(options.includeGlobs());
         excludes = compileGlobs(options.excludeGlobs());
+        claimStore();
+    }
+
+    /**
+     * Sibling servers resolving the same default paths must not list, prune or restore each
+     * other's archives. The first engine claims an unclaimed store; any other root is refused.
+     */
+    private void claimStore() throws IOException {
+        Path marker = destination.resolve(OWNER_MARKER);
+        String expected = root.toString();
+        if (Files.exists(marker, NOFOLLOW_LINKS)) {
+            BasicFileAttributes attributes = ensureRegularFile(marker);
+            // A crash can leave the freshly created marker empty; that never names an owner.
+            if (attributes.size() > 0) {
+                String owner = readOwner(marker);
+                if (!owner.equals(expected)) throw new IOException("Backup directory " + printable(destination.toString())
+                        + " belongs to another server root (" + printable(owner) + "). Give every server its own storage.backup-directory"
+                        + " and storage.state-directory. If this server was moved, delete " + printable(marker.toString())
+                        + " only after confirming that no other server uses this directory.");
+                return;
+            }
+        }
+        Properties owner = new Properties();
+        owner.setProperty("formatVersion", "1");
+        owner.setProperty("serverRoot", expected);
+        Path temp = destination.resolve(".vaultbackup-owner." + UUID.randomUUID() + ".tmp");
+        try {
+            try (FileChannel channel = createPrivateFile(temp)) {
+                OutputStream output = Channels.newOutputStream(channel);
+                owner.store(output, "VaultBackup Pro backup store owner");
+                output.flush();
+                channel.force(true);
+            }
+            if (Files.exists(marker, NOFOLLOW_LINKS) && Files.size(marker) > 0) {
+                if (!readOwner(marker).equals(expected)) throw new IOException("Backup directory was claimed by another server root: " + printable(destination.toString()));
+                return;
+            }
+            Files.move(temp, marker, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            syncDirectory(destination);
+        } finally { Files.deleteIfExists(temp); }
+    }
+
+    private static String readOwner(Path marker) throws IOException {
+        ensureRegularFile(marker);
+        if (Files.size(marker) > 16 * 1024) throw new IOException("Backup store owner marker is too large: " + marker);
+        Properties owner = new Properties();
+        try (InputStream input = Channels.newInputStream(Files.newByteChannel(marker, Set.of(READ, NOFOLLOW_LINKS)))) { owner.load(input); }
+        catch (IllegalArgumentException e) { throw new IOException("Malformed backup store owner marker: " + marker, e); }
+        String value = owner.getProperty("serverRoot");
+        if (!"1".equals(owner.getProperty("formatVersion")) || value == null || value.isBlank()) throw new IOException("Unreadable backup store owner marker: " + marker);
+        return value;
     }
 
     public BackupOptions options() { return options; }
@@ -88,7 +148,7 @@ public final class BackupEngine {
         cancelled = cancellation(cancelled);
         progress = reporter(progress);
         if (label == null) label = "";
-        if (label.length() > 200 || label.chars().anyMatch(Character::isISOControl)) throw new IOException("Label must be at most 200 printable characters");
+        if (!validLabel(label)) throw new IOException("Label must be at most 200 printable characters");
         checkCancelled(cancelled);
         checkedExistingDirectory(root);
         checkedExistingDirectory(destination);
@@ -198,6 +258,7 @@ public final class BackupEngine {
     private List<BackupRecord> catalogue(BooleanSupplier cancelled, Consumer<String> progress, boolean revalidate) throws IOException {
         List<BackupRecord> good = new ArrayList<>();
         Set<String> present = new HashSet<>();
+        Map<String, String> failures = new LinkedHashMap<>();
         checkedExistingDirectory(destination);
         try (DirectoryStream<Path> paths = Files.newDirectoryStream(destination, "*.properties")) {
             for (Path path : paths) {
@@ -210,13 +271,25 @@ public final class BackupEngine {
                     BackupRecord unchanged = revalidate ? null : unchangedVerified(id);
                     good.add(unchanged != null ? unchanged : verify(id, cancelled, progress));
                 } catch (InterruptedIOException e) { throw e; }
-                catch (IOException e) { reporter(progress).accept("Ignoring incomplete or corrupt backup " + id + ": " + e.getMessage()); }
+                catch (IOException e) {
+                    String reason = printable(String.valueOf(e.getMessage()));
+                    failures.put(id, reason);
+                    reporter(progress).accept("Ignoring incomplete or corrupt backup " + id + ": " + reason);
+                }
             }
         }
         verifiedArchives.keySet().retainAll(present);
+        rejected.clear();
+        rejected.putAll(failures);
         good.sort(Comparator.comparing(BackupRecord::createdAt).reversed().thenComparing(BackupRecord::id));
         return List.copyOf(good);
     }
+
+    /**
+     * Sidecars the latest listing found but could not verify (ID to reason). They are never listed,
+     * restored or pruned by retention, and stay on disk for the administrator to inspect.
+     */
+    public synchronized Map<String, String> rejectedBackups() { return Map.copyOf(rejected); }
 
     /** Always performs full verification, then remembers the result only if the files did not change meanwhile. */
     public synchronized BackupRecord verify(String id, BooleanSupplier cancelled, Consumer<String> progress) throws IOException {
@@ -293,18 +366,33 @@ public final class BackupEngine {
             List<BackupRecord> good = listBackups();
             BackupRecord target = good.stream().filter(r -> r.id().equals(id)).findFirst().orElseThrow(() -> new IOException("Backup is missing or corrupt: " + id));
             removeRecord(target);
+            removeOrphanedArchives(protectedCopy);
         }
     }
 
     /** Retention may remove every unprotected archive; reserved targets can exceed the limits. */
     public synchronized List<BackupRecord> retain(int maxCount, long maxBytes, Set<String> protectedIds,
                                                  BooleanSupplier cancelled, Consumer<String> progress) throws IOException {
+        return retain(maxCount, maxBytes, protectedIds, null, cancelled, progress);
+    }
+
+    /**
+     * As above, but the just-created newestId is always treated as the newest record. Wall-clock
+     * creation times can be skewed (clock steps, VM snapshots), and must never make retention
+     * delete the recovery point that was just made before older generations.
+     */
+    public synchronized List<BackupRecord> retain(int maxCount, long maxBytes, Set<String> protectedIds, String newestId,
+                                                 BooleanSupplier cancelled, Consumer<String> progress) throws IOException {
         if (maxCount < 1 || maxBytes < 1) throw new IOException("Retention limits must be positive");
         Set<String> protectedCopy = Set.copyOf(Objects.requireNonNull(protectedIds));
         cancelled = cancellation(cancelled);
         progress = reporter(progress);
         try (FileChannel channel = openLock(); FileLock ignored = acquireLock(channel)) {
+            removeOrphanedArchives(protectedCopy);
             List<BackupRecord> good = new ArrayList<>(listBackups(cancelled, progress));
+            for (int i = 0; newestId != null && i < good.size(); i++) {
+                if (good.get(i).id().equals(newestId)) { good.addFirst(good.remove(i)); break; }
+            }
             List<BackupRecord> removed = new ArrayList<>();
             long bytes = 0;
             for (BackupRecord r : good) bytes = boundedAdd(bytes, r.compressedBytes(), Long.MAX_VALUE, "Backup size overflow");
@@ -330,8 +418,43 @@ public final class BackupEngine {
         // Withdraw the commit marker first, so an interrupted delete is never listed.
         Files.delete(target.metadataPath());
         syncDirectory(destination);
-        Files.delete(target.zipPath());
+        try {
+            Files.delete(target.zipPath());
+        } catch (IOException e) {
+            throw new IOException("Backup " + target.id() + " was withdrawn, but its archive could not be deleted yet;"
+                    + " a later delete or retention run removes it: " + printable(target.zipPath().toString()), e);
+        }
         syncDirectory(destination);
+    }
+
+    /**
+     * Caller holds the store lock. "ID.zip" without its "ID.properties" commit marker is left by a
+     * crash or failed delete after the marker was withdrawn, or by a crash between the two
+     * publication renames. It is never listed or counted, so it would otherwise leak a whole
+     * archive of disk forever. Reserved IDs, symlinks and anything with a sidecar entry of any
+     * kind are kept. Best effort: a locked file is retried by the next locked operation.
+     */
+    private void removeOrphanedArchives(Set<String> protectedIds) {
+        List<Path> orphans = new ArrayList<>();
+        try (DirectoryStream<Path> paths = Files.newDirectoryStream(destination, "*.zip")) {
+            for (Path path : paths) {
+                String name = path.getFileName().toString();
+                String id = name.substring(0, name.length() - ".zip".length());
+                if (!ID.matcher(id).matches() || protectedIds.contains(id)) continue;
+                if (Files.exists(destination.resolve(id + ".properties"), NOFOLLOW_LINKS)) continue;
+                orphans.add(path);
+            }
+        } catch (IOException | DirectoryIteratorException unreadable) { return; }
+        boolean removed = false;
+        for (Path path : orphans) {
+            try {
+                BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class, NOFOLLOW_LINKS);
+                if (attributes.isRegularFile() && !attributes.isSymbolicLink()) removed |= Files.deleteIfExists(path);
+            } catch (IOException ignored) { /* Retried by the next locked operation. */ }
+        }
+        if (removed) {
+            try { syncDirectory(destination); } catch (IOException ignored) { /* Durability of a cleanup is best effort. */ }
+        }
     }
 
     /**
@@ -363,11 +486,39 @@ public final class BackupEngine {
         }
     }
 
+    /**
+     * Owner-only: a shared (read) lock held by any account that can open the file would block every
+     * exclusive store lock, and with it all backups, retention and deletes. Older versions created
+     * the file with default permissions; tighten those in place, never replace the shared inode.
+     */
     private FileChannel openLock() throws IOException {
         checkedExistingDirectory(destination);
         Path lockPath = destination.resolve(".vaultbackup.lock");
         if (Files.exists(lockPath, NOFOLLOW_LINKS)) ensureRegularFile(lockPath);
-        return FileChannel.open(lockPath, CREATE, WRITE, NOFOLLOW_LINKS);
+        FileChannel channel;
+        try {
+            channel = FileChannel.open(lockPath, Set.of(CREATE, WRITE, NOFOLLOW_LINKS),
+                    PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+        } catch (UnsupportedOperationException nonPosix) {
+            channel = FileChannel.open(lockPath, CREATE, WRITE, NOFOLLOW_LINKS);
+        }
+        try {
+            restrictToOwner(lockPath);
+        } catch (IOException | RuntimeException e) {
+            channel.close();
+            throw e;
+        }
+        return channel;
+    }
+
+    private static void restrictToOwner(Path file) throws IOException {
+        PosixFileAttributeView view = Files.getFileAttributeView(file, PosixFileAttributeView.class, NOFOLLOW_LINKS);
+        if (view == null) return;
+        Set<PosixFilePermission> permissions = view.readAttributes().permissions();
+        Set<PosixFilePermission> ownerOnly = EnumSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);
+        if (ownerOnly.containsAll(permissions)) return;
+        // Best effort: a lock that still works must never block backups over a permission change.
+        try { view.setPermissions(ownerOnly); } catch (IOException | RuntimeException ignored) { }
     }
 
     private static FileLock acquireLock(FileChannel channel) throws IOException {
@@ -380,9 +531,17 @@ public final class BackupEngine {
         }
     }
 
+    /**
+     * Includes apply to directories as excludes do: a directory whose path (or path + "/") matches
+     * an include brings in its whole subtree, still subject to excludes. Any other directory is
+     * archived only as an ancestor of an included entry, so writes in parts of the server the
+     * administrator chose not to back up cannot abort a backup or consume the entry limit.
+     */
     private List<Source> scan(BooleanSupplier cancelled) throws IOException {
         List<Source> sources = new ArrayList<>();
         Set<String> portableNames = new HashSet<>();
+        Map<String, Source> ancestorCandidates = new HashMap<>();
+        Deque<Boolean> includedDirectories = new ArrayDeque<>();
         BasicFileAttributes rootBefore = Files.readAttributes(root, BasicFileAttributes.class, NOFOLLOW_LINKS);
         Files.walkFileTree(root, new SimpleFileVisitor<>() {
             @Override public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attrs) throws IOException {
@@ -390,30 +549,51 @@ public final class BackupEngine {
                 if (isAutomaticallyExcluded(directory)) return FileVisitResult.SKIP_SUBTREE;
                 String name = relative(directory);
                 if (!name.isEmpty() && denied(name, true)) return FileVisitResult.SKIP_SUBTREE;
-                if (attrs.isSymbolicLink() || !attrs.isDirectory()) throw new IOException("Unsafe directory: " + directory);
+                if (attrs.isSymbolicLink() || !attrs.isDirectory()) throw new IOException("Unsafe directory: " + printable(directory.toString()));
                 checkedAbsolutePath(directory);
-                if (!name.isEmpty()) addSource(directory, name, true, attrs);
+                boolean included = name.isEmpty() ? includes.isEmpty() : insideIncludedDirectory() || includedDirectory(name);
+                includedDirectories.push(included);
+                if (!name.isEmpty()) {
+                    Source source = new Source(directory, name, true, attrs);
+                    if (included) addSource(sources, portableNames, source); else ancestorCandidates.put(name, source);
+                }
+                return FileVisitResult.CONTINUE;
+            }
+            @Override public FileVisitResult postVisitDirectory(Path directory, IOException exception) throws IOException {
+                if (exception != null) throw exception;
+                includedDirectories.pop();
                 return FileVisitResult.CONTINUE;
             }
             @Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
                 checkCancelled(cancelled);
                 if (isAutomaticallyExcluded(file)) return FileVisitResult.CONTINUE;
                 String name = relative(file);
-                if (denied(name, false) || !included(name)) return FileVisitResult.CONTINUE;
-                if (attrs.isSymbolicLink() || !attrs.isRegularFile()) throw new IOException("Symlinks and nonregular files are refused: " + name);
-                if (attrs.size() > options.maxEntryBytes()) throw new IOException("File exceeds entry byte limit: " + name);
-                addSource(file, name, false, attrs);
+                if (denied(name, false) || !(insideIncludedDirectory() || included(name))) return FileVisitResult.CONTINUE;
+                if (attrs.isSymbolicLink() || !attrs.isRegularFile()) throw new IOException("Symlinks and nonregular files are refused: " + printable(name));
+                if (attrs.size() > options.maxEntryBytes()) throw new IOException("File exceeds entry byte limit: " + printable(name));
+                addSource(sources, portableNames, new Source(file, name, false, attrs));
                 return FileVisitResult.CONTINUE;
             }
-            @Override public FileVisitResult visitFileFailed(Path file, IOException exception) throws IOException { throw exception; }
-            private void addSource(Path file, String name, boolean directory, BasicFileAttributes attrs) throws IOException {
-                validateEntryPath(name);
-                if (name.equalsIgnoreCase(MANIFEST_PATH)) throw new IOException("Source uses reserved manifest name");
-                if (!portableNames.add(portableKey(name))) throw new IOException("Case/Unicode-colliding archive paths: " + name);
-                if (sources.size() >= options.maxEntries()) throw new IOException("Backup entry count exceeds limit");
-                sources.add(new Source(file, name, directory, attrs));
+            @Override public FileVisitResult visitFileFailed(Path file, IOException exception) throws IOException {
+                // An unreadable directory is reported here without preVisitDirectory, so apply the
+                // same policy first: excluded paths are skipped, anything that would be archived fails.
+                if (isAutomaticallyExcluded(file)) return FileVisitResult.CONTINUE;
+                String name = relative(file);
+                if (!name.isEmpty() && excludedWhenUnreadable(file, name)) return FileVisitResult.CONTINUE;
+                throw exception;
+            }
+            private boolean insideIncludedDirectory() { return !includedDirectories.isEmpty() && includedDirectories.peek(); }
+            private boolean excludedWhenUnreadable(Path file, String name) {
+                try {
+                    BasicFileAttributes attributes = Files.readAttributes(file, BasicFileAttributes.class, NOFOLLOW_LINKS);
+                    if (attributes.isDirectory()) return denied(name, true);
+                    return denied(name, false) || !(insideIncludedDirectory() || included(name));
+                } catch (IOException | RuntimeException unknownType) {
+                    return denied(name, true) && denied(name, false);
+                }
             }
         });
+        addAncestors(sources, portableNames, ancestorCandidates);
         BasicFileAttributes rootAfter = Files.readAttributes(root, BasicFileAttributes.class, NOFOLLOW_LINKS);
         if (!sameIdentity(rootBefore, rootAfter) || !rootBefore.lastModifiedTime().equals(rootAfter.lastModifiedTime())) throw new IOException("Server root changed while scanning");
         sources.sort(Comparator.comparing(Source::name));
@@ -422,12 +602,59 @@ public final class BackupEngine {
         return sources;
     }
 
+    private void addSource(List<Source> sources, Set<String> portableNames, Source source) throws IOException {
+        String name = source.name();
+        validateEntryPath(name);
+        requireLosslessName(source);
+        if (name.equalsIgnoreCase(MANIFEST_PATH)) throw new IOException("Source uses reserved manifest name");
+        if (!portableNames.add(portableKey(name))) throw new IOException("Case/Unicode-colliding archive paths: " + printable(name));
+        if (sources.size() >= options.maxEntries()) throw new IOException("Backup entry count exceeds limit");
+        sources.add(source);
+    }
+
+    /**
+     * U+FFFD is how the JVM reports a file name it could not decode (a non-UTF-8 locale, or a
+     * name that is not valid UTF-8). Archiving it would rename the file on restore, or make the
+     * backup impossible to restore at all, so the backup is refused with the reason instead.
+     */
+    private void requireLosslessName(Source source) throws IOException {
+        String name = source.name();
+        String hint = " (file-name encoding " + System.getProperty("sun.jnu.encoding") + "; start the server with a UTF-8 locale such as"
+                + " LANG=C.UTF-8, or exclude or rename the file): ";
+        if (name.indexOf('\uFFFD') >= 0) throw new IOException("A file name cannot be stored without changing it" + hint + printable(name));
+        if (WINDOWS || System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac")) return;
+        try {
+            // Byte-exact on Linux: the name must lead back to the very file that was walked.
+            if (!root.resolve(name).equals(source.path())) throw new IOException("A file name does not round-trip" + hint + printable(name));
+        } catch (InvalidPathException unrepresentable) {
+            throw new IOException("A file name cannot be represented" + hint + printable(name), unrepresentable);
+        }
+    }
+
+    /** Adds the not-themselves-included directories that contain an archived entry. */
+    private void addAncestors(List<Source> sources, Set<String> portableNames, Map<String, Source> candidates) throws IOException {
+        Set<String> covered = new HashSet<>();
+        List<Source> ancestors = new ArrayList<>();
+        for (Source source : sources) {
+            String parent = source.name();
+            int slash;
+            while ((slash = parent.lastIndexOf('/')) > 0) {
+                parent = parent.substring(0, slash);
+                if (!covered.add(parent)) break; // Every ancestor above it was already handled.
+                Source ancestor = candidates.remove(parent);
+                if (ancestor != null) ancestors.add(ancestor);
+            }
+        }
+        for (Source ancestor : ancestors) addSource(sources, portableNames, ancestor);
+    }
+
     private boolean isAutomaticallyExcluded(Path path) {
         Path absolute = path.toAbsolutePath().normalize();
         return absolute.startsWith(destination) || absolute.startsWith(state);
     }
     private String relative(Path path) { return root.relativize(path).toString().replace(File.separatorChar, '/'); }
     private boolean included(String path) { return includes.isEmpty() || includes.stream().anyMatch(p -> p.matcher(path).matches()); }
+    private boolean includedDirectory(String path) { return included(path) || included(path + "/"); }
     private boolean denied(String path, boolean directory) {
         return excludes.stream().anyMatch(p -> p.matcher(path).matches() || (directory && p.matcher(path + "/").matches()));
     }
@@ -460,9 +687,7 @@ public final class BackupEngine {
         try (ZipFile zip = new ZipFile(record.zipPath().toFile(), StandardCharsets.UTF_8)) {
             Map<String, ZipEntry> entries = new LinkedHashMap<>();
             Set<String> portable = new HashSet<>();
-            Map<String, String> spellings = new HashMap<>();
-            Set<String> filePaths = new HashSet<>();
-            Set<String> directoryPaths = new HashSet<>();
+            PortableTree tree = new PortableTree();
             ZipEntry manifestEntry = null;
             Enumeration<? extends ZipEntry> enumeration = zip.entries();
             while (enumeration.hasMoreElements()) {
@@ -477,11 +702,12 @@ public final class BackupEngine {
                 if (entry.isDirectory()) name = name.substring(0, name.length() - 1);
                 validateEntryPath(name);
                 if (name.equalsIgnoreCase(MANIFEST_PATH)) throw new IOException("Reserved manifest name collision");
-                if (entries.putIfAbsent(name, entry) != null || !portable.add(portableKey(name))) throw new IOException("Duplicate/colliding ZIP entry: " + name);
-                registerPortablePath(name, entry.isDirectory(), spellings, filePaths, directoryPaths);
+                if (entries.putIfAbsent(name, entry) != null || !portable.add(portableKey(name))) throw new IOException("Duplicate/colliding ZIP entry: " + printable(name));
+                // Also rejects any file that is an ancestor of another entry.
+                tree.register(name, entry.isDirectory());
                 if (entries.size() > limits.maxEntries()) throw new IOException("Archive entry count exceeds limit");
-                if (entry.getSize() < 0 || entry.getCompressedSize() < 0 || entry.getSize() > limits.maxEntryBytes()) throw new IOException("Invalid or excessive ZIP entry size: " + name);
-                if (entry.isDirectory() && entry.getSize() != 0) throw new IOException("Directory contains data: " + name);
+                if (entry.getSize() < 0 || entry.getCompressedSize() < 0 || entry.getSize() > limits.maxEntryBytes()) throw new IOException("Invalid or excessive ZIP entry size: " + printable(name));
+                if (entry.isDirectory() && entry.getSize() != 0) throw new IOException("Directory contains data: " + printable(name));
                 checkCompressionRatio(entry, limits.maxCompressionRatio());
             }
             if (manifestEntry == null) throw new IOException("Missing archive manifest");
@@ -493,14 +719,7 @@ public final class BackupEngine {
             for (ManifestEntry expected : manifest) {
                 checkCancelled(cancelled);
                 ZipEntry entry = entries.remove(expected.path());
-                if (entry == null || entry.isDirectory() != expected.directory() || entry.getSize() != expected.size()) throw new IOException("Manifest/ZIP disagreement: " + expected.path());
-                // A file must never be an ancestor of another entry.
-                String parent = expected.path();
-                while (parent.contains("/")) {
-                    parent = parent.substring(0, parent.lastIndexOf('/'));
-                    ZipEntry ancestor = zip.getEntry(parent);
-                    if (ancestor != null && !ancestor.isDirectory()) throw new IOException("File/directory path conflict: " + expected.path());
-                }
+                if (entry == null || entry.isDirectory() != expected.directory() || entry.getSize() != expected.size()) throw new IOException("Manifest/ZIP disagreement: " + printable(expected.path()));
                 progress.accept("Verifying " + expected.path());
                 MessageDigest digest = sha256();
                 CRC32 crc = new CRC32();
@@ -516,8 +735,8 @@ public final class BackupEngine {
                         crc.update(buffer, 0, count);
                     }
                 }
-                if (copied != expected.size() || crc.getValue() != entry.getCrc()) throw new IOException("Entry size/CRC mismatch: " + expected.path());
-                if (!expected.directory() && !hex(digest.digest()).equals(expected.sha256())) throw new IOException("Entry SHA-256 mismatch: " + expected.path());
+                if (copied != expected.size() || crc.getValue() != entry.getCrc()) throw new IOException("Entry size/CRC mismatch: " + printable(expected.path()));
+                if (!expected.directory() && !hex(digest.digest()).equals(expected.sha256())) throw new IOException("Entry SHA-256 mismatch: " + printable(expected.path()));
             }
             if (!entries.isEmpty() || total != record.totalBytes()) throw new IOException("Archive total/manifest mismatch");
         } catch (IllegalArgumentException e) { throw new IOException("Malformed ZIP archive", e); }
@@ -638,7 +857,7 @@ public final class BackupEngine {
             long total = Long.parseLong(required(metadata, "totalBytes"));
             int count = Integer.parseInt(required(metadata, "entryCount"));
             String label = required(metadata, "label");
-            if (bytes < 1 || total < 0 || count < 0 || label.length() > 200 || label.chars().anyMatch(Character::isISOControl)) throw new IOException("Invalid archive metadata");
+            if (bytes < 1 || total < 0 || count < 0 || !validLabel(label)) throw new IOException("Invalid archive metadata");
             return new BackupRecord(id, Instant.parse(required(metadata, "createdAt")), label,
                     zip.toAbsolutePath().normalize(), path.toAbsolutePath().normalize(), bytes, total, count, digest);
         } catch (RuntimeException e) { throw new IOException("Malformed metadata", e); }
@@ -650,41 +869,107 @@ public final class BackupEngine {
         return value;
     }
 
-    /** Strict portable archive paths; never accept absolute paths, traversal, ADS or device names. */
-    public static void validateEntryPath(String path) throws IOException {
+    /**
+     * Strict archive paths: never absolute, traversal, control characters or undecodable names.
+     * The Windows-only rules (device names, reserved characters, trailing dots or spaces) apply
+     * where the host is Windows. Elsewhere such names are ordinary plugin data that must not abort
+     * every backup; an archive holding them still fails closed in verification on a Windows host.
+     */
+    public static void validateEntryPath(String path) throws IOException { validateEntryPath(path, WINDOWS); }
+
+    public static void validateEntryPath(String path, boolean windowsRules) throws IOException {
         if (path == null || path.isEmpty() || path.length() > 4096 || path.getBytes(StandardCharsets.UTF_8).length > 4096 ||
-                path.startsWith("/") || path.endsWith("/") || path.indexOf('\\') >= 0 || path.indexOf(':') >= 0 ||
-                path.chars().anyMatch(c -> Character.isISOControl(c) || c == 0)) throw new IOException("Unsafe archive path: " + path);
+                path.startsWith("/") || path.endsWith("/") || path.indexOf('\\') >= 0 ||
+                path.chars().anyMatch(c -> Character.isISOControl(c) || c == 0)) throw new IOException("Unsafe archive path: " + printable(path));
+        if (hasUnpairedSurrogate(path)) throw new IOException("Archive path is not valid Unicode: " + printable(path));
         for (String component : path.split("/", -1)) {
-            if (component.isEmpty() || component.equals(".") || component.equals("..") || component.endsWith(".") || component.endsWith(" ") ||
-                    component.indexOf('<') >= 0 || component.indexOf('>') >= 0 || component.indexOf('"') >= 0 ||
-                    component.indexOf('|') >= 0 || component.indexOf('?') >= 0 || component.indexOf('*') >= 0) throw new IOException("Unsafe archive path: " + path);
-            String base = component.split("\\.", 2)[0].toUpperCase(Locale.ROOT);
-            if (base.matches("CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]")) throw new IOException("Reserved device name in archive path: " + path);
+            if (component.isEmpty() || component.equals(".") || component.equals("..")) throw new IOException("Unsafe archive path: " + printable(path));
+            if (!windowsRules) continue;
+            if (component.endsWith(".") || component.endsWith(" ") || component.chars().anyMatch(c -> "<>:\"|?*".indexOf(c) >= 0))
+                throw new IOException("Name is not valid on Windows: " + printable(path));
+            // Windows ignores trailing spaces before the extension: "CON .txt" still opens CON.
+            String base = component.split("\\.", 2)[0].replaceAll(" +$", "").toUpperCase(Locale.ROOT);
+            if (DEVICE.matcher(base).matches()) throw new IOException("Reserved device name in archive path: " + printable(path));
         }
+    }
+
+    private static boolean hasUnpairedSurrogate(String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (Character.isHighSurrogate(c) && i + 1 < value.length() && Character.isLowSurrogate(value.charAt(i + 1))) { i++; continue; }
+            if (Character.isSurrogate(c)) return true;
+        }
+        return false;
+    }
+
+    /** Labels are shown to administrators; reject anything that can forge or restyle a chat line. */
+    public static boolean validLabel(String label) {
+        if (label == null || label.length() > 200 || hasUnpairedSurrogate(label)) return false;
+        return label.codePoints().noneMatch(c -> needsEscape(c) || Character.getType(c) == Character.PRIVATE_USE
+                || Character.getType(c) == Character.UNASSIGNED);
+    }
+
+    private static boolean needsEscape(int c) {
+        int type = Character.getType(c);
+        return c == '\u00a7' || Character.isISOControl(c) || type == Character.LINE_SEPARATOR || type == Character.PARAGRAPH_SEPARATOR
+                || type == Character.FORMAT || type == Character.SURROGATE;
+    }
+
+    /**
+     * Archive-derived text for exception and log messages: control, format and line-separator
+     * characters (and the legacy formatting prefix) become visible escapes, so a crafted name can
+     * neither forge log lines nor inject terminal sequences.
+     */
+    public static String printable(String value) {
+        if (value == null) return "null";
+        StringBuilder out = new StringBuilder(Math.min(value.length(), 512) + 16);
+        int count = 0;
+        for (int i = 0; i < value.length(); ) {
+            int c = value.codePointAt(i);
+            i += Character.charCount(c);
+            if (++count > 512) { out.append("..."); break; }
+            if (needsEscape(c)) out.append(String.format(Locale.ROOT, "\\u%04X", c));
+            else out.appendCodePoint(c);
+        }
+        return out.toString();
     }
 
     public static void validateId(String id) throws IOException {
         if (id == null || !ID.matcher(id).matches()) throw new IOException("Invalid backup ID");
     }
 
-    private static void registerPortablePath(String path, boolean directory, Map<String, String> spellings,
-                                             Set<String> files, Set<String> directories) throws IOException {
-        StringBuilder prefix = new StringBuilder();
-        String[] components = path.split("/");
-        for (int i = 0; i < components.length; i++) {
-            if (i != 0) prefix.append('/');
-            prefix.append(components[i]);
-            String spelling = prefix.toString();
-            String key = portableKey(spelling);
-            String previous = spellings.putIfAbsent(key, spelling);
-            if (previous != null && !previous.equals(spelling)) throw new IOException("Case/Unicode-alias ancestor path: " + path);
-            if (i < components.length - 1 || directory) {
-                if (files.contains(key)) throw new IOException("File/directory ancestor conflict: " + path);
-                directories.add(key);
-            } else {
-                if (directories.contains(key)) throw new IOException("File/directory ancestor conflict: " + path);
-                files.add(key);
+    /**
+     * Linear-memory portable path bookkeeping: one node per distinct (parent, portable component).
+     * Storing every full ancestor prefix instead is quadratic in path depth, which lets a small
+     * crafted archive of deep paths exhaust the heap during routine catalogue verification.
+     */
+    private static final class PortableTree {
+        private final Map<String, Integer> nodes = new HashMap<>();
+        private final List<String> spellings = new ArrayList<>();
+        private final BitSet files = new BitSet();
+        private final BitSet directories = new BitSet();
+
+        void register(String path, boolean directory) throws IOException {
+            String[] components = path.split("/");
+            int parent = 0;
+            for (int i = 0; i < components.length; i++) {
+                String key = parent + "/" + portableKey(components[i]);
+                Integer node = nodes.get(key);
+                if (node == null) {
+                    spellings.add(components[i]);
+                    node = spellings.size();
+                    nodes.put(key, node);
+                } else if (!spellings.get(node - 1).equals(components[i])) {
+                    throw new IOException("Case/Unicode-alias ancestor path: " + printable(path));
+                }
+                if (i < components.length - 1 || directory) {
+                    if (files.get(node)) throw new IOException("File/directory ancestor conflict: " + printable(path));
+                    directories.set(node);
+                } else {
+                    if (directories.get(node)) throw new IOException("File/directory ancestor conflict: " + printable(path));
+                    files.set(node);
+                }
+                parent = node;
             }
         }
     }

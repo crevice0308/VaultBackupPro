@@ -42,6 +42,16 @@ public final class BackupEngineTest {
             storeLockIsFailFast();
             privateFilesAndAbandonedPartCleanup();
             verificationIsNotRepeatedForUnchangedArchives();
+            includesAreDirectoryAware();
+            unreadableExcludedDirectoriesAreSkipped();
+            portableNameRules();
+            lossyFileNamesAreRefused();
+            storeLockIsOwnerOnly();
+            retentionNeverPrefersSkewedClocks();
+            orphanedArchivesAreReclaimed();
+            deepPathsVerifyInLinearMemory();
+            untrustedLabelsAndCorruptionAreReported();
+            storeBelongsToOneServer();
             System.out.println("PASS BackupEngineTest (" + checks + " checks)");
         } finally {
             try (var paths = Files.walk(fixture)) {
@@ -134,8 +144,11 @@ public final class BackupEngineTest {
         Files.delete(engine.serverRoot().resolve("link"));
         Files.createSymbolicLink(engine.serverRoot().resolve("linked-directory"), outside.getParent());
         expectIOException(() -> engine.createBackup("linkdir"), "symlink directory rejected");
-        for (String unsafe : List.of("../escape", "/absolute", "a/../b", "C:/evil", "a\\b", "a//b", "./a", "NUL.txt", "a.", "a ", "x:y", "a/", "\nname")) {
+        for (String unsafe : List.of("../escape", "/absolute", "a/../b", "a\\b", "a//b", "./a", "a/", "\nname", "a\u0085b", "bad\ud800")) {
             expectIOException(() -> BackupEngine.validateEntryPath(unsafe), "unsafe path " + unsafe.replace("\n", "<newline>"));
+        }
+        for (String windowsOnly : List.of("C:/evil", "NUL.txt", "a.", "a ", "x:y")) {
+            expectIOException(() -> BackupEngine.validateEntryPath(windowsOnly, true), "Windows-invalid path " + windowsOnly);
         }
         expectIOException(() -> engine.verify("../fake"), "unsafe backup id");
         BackupEngine.validateEntryPath("world/日本語.dat"); checks++;
@@ -447,6 +460,213 @@ public final class BackupEngineTest {
         expectIOException(() -> engine.verify(first.id()), "explicit verify rejects the corrupt archive");
         engine.delete(second.id(), Set.of());
         equal(engine.listBackups().size(), 0, "deleted archive is not served from cache");
+    }
+
+
+    private static void includesAreDirectoryAware() throws Exception {
+        BackupEngine first = engine("include-directories");
+        Path root = first.serverRoot();
+        Files.createDirectories(root.resolve("world/region"));
+        Files.writeString(root.resolve("world/level.dat"), "level");
+        Files.writeString(root.resolve("world/region/r.0.0.mca"), "region");
+        Files.createDirectories(root.resolve("plugins/dynmap/web/tiles"));
+        Files.writeString(root.resolve("plugins/dynmap/web/tiles/tile.png"), "tile");
+        Files.createDirectories(root.resolve("plugins/Essentials"));
+        Files.writeString(root.resolve("plugins/Essentials/config.yml"), "config");
+        Files.createDirectories(root.resolve("logs"));
+        Files.writeString(root.resolve("logs/latest.log"), "log");
+        BackupOptions defaults = first.options();
+
+        BackupEngine worldOnly = new BackupEngine(options(defaults, List.of("world"), List.of("logs"), 100, 1024, 4096, 10000));
+        BackupRecord world = worldOnly.createBackup("world");
+        Set<String> names = new HashSet<>();
+        for (var entry : BackupEngine.readManifest(world)) names.add((entry.directory() ? "D:" : "F:") + entry.path());
+        equal(names, Set.of("D:world", "D:world/region", "F:world/level.dat", "F:world/region/r.0.0.mca"),
+                "a directory include archives its whole subtree and nothing else");
+        check(world.totalBytes() == "level".length() + "region".length(), "directory include is never an empty successful backup");
+
+        BackupEngine nested = new BackupEngine(options(defaults, List.of("plugins/Essentials/**"), List.of(), 100, 1024, 4096, 10000));
+        names.clear();
+        for (var entry : BackupEngine.readManifest(nested.createBackup("nested"))) names.add((entry.directory() ? "D:" : "F:") + entry.path());
+        equal(names, Set.of("D:plugins", "D:plugins/Essentials", "F:plugins/Essentials/config.yml"),
+                "only ancestors of included entries are archived as directories");
+
+        // Writes in a directory the administrator chose not to back up must not abort the backup.
+        AtomicBoolean changed = new AtomicBoolean();
+        BackupRecord unaffected = worldOnly.createBackup("concurrent-elsewhere", () -> false, message -> {
+            if (message.startsWith("Backing up ") && changed.compareAndSet(false, true)) {
+                try { Files.writeString(root.resolve("plugins/dynmap/web/tiles/new.png"), "new tile"); }
+                catch (IOException e) { throw new UncheckedIOException(e); }
+            }
+        });
+        check(changed.get() && worldOnly.verify(unaffected.id()).id().equals(unaffected.id()), "changes outside the included tree never abort a backup");
+        BackupEngine limited = new BackupEngine(options(defaults, List.of("world/**"), List.of(), 4, 1024, 4096, 10000));
+        equal(limited.createBackup("limited").entryCount(), 4, "the entry limit counts only archived entries");
+    }
+
+    private static void unreadableExcludedDirectoriesAreSkipped() throws Exception {
+        BackupEngine engine = engine("unreadable-excluded");
+        Path root = engine.serverRoot();
+        Files.writeString(root.resolve("kept.dat"), "kept");
+        Path closed = Files.createDirectory(root.resolve("lost+found"));
+        Files.writeString(closed.resolve("inside"), "unreadable");
+        if (!Files.getFileStore(closed).supportsFileAttributeView(PosixFileAttributeView.class)) return;
+        Files.setPosixFilePermissions(closed, PosixFilePermissions.fromString("---------"));
+        try {
+            if (Files.isReadable(closed)) {
+                System.out.println("SKIP unreadable-directory check: this account bypasses file permissions");
+                return;
+            }
+            BackupEngine excluding = new BackupEngine(options(engine.options(), List.of(), List.of("lost+found"), 100, 1024, 4096, 10000));
+            BackupRecord record = excluding.createBackup("excluded-unreadable");
+            check(BackupEngine.readManifest(record).stream().noneMatch(e -> e.path().startsWith("lost+found")), "an excluded unreadable directory is skipped");
+            expectIOException(() -> engine.createBackup("included-unreadable"), "an unreadable directory that would be archived still fails the backup");
+        } finally {
+            Files.setPosixFilePermissions(closed, PosixFilePermissions.fromString("rwx------"));
+        }
+    }
+
+    private static void portableNameRules() throws Exception {
+        for (String device : List.of("world/COM\u00b9", "LPT\u00b2.txt", "COM0", "LPT0", "CONIN$", "plugins/CONOUT$", "conout$.log", "CON .txt", "con.yml", "Aux.json")) {
+            expectIOException(() -> BackupEngine.validateEntryPath(device, true), "Windows device name " + device);
+            BackupEngine.validateEntryPath(device, false); checks++;
+        }
+        BackupEngine.validateEntryPath("report 12:30.yml", false); checks++;
+        BackupEngine engine = engine("portable-names");
+        Path warps = Files.createDirectories(engine.serverRoot().resolve("plugins/Essentials/warps"));
+        Files.writeString(warps.resolve("con.yml"), "warp");
+        if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")) {
+            BackupRecord record = engine.createBackup("windows-device-name");
+            check(BackupEngine.readManifest(record).stream().anyMatch(e -> e.path().equals("plugins/Essentials/warps/con.yml")),
+                    "a Windows-only name never aborts every backup on another platform");
+        }
+        String escaped = BackupEngine.printable("evil\u001b[2J\nnext\u2028line\u00a7a\u202e");
+        check(escaped.chars().noneMatch(c -> Character.isISOControl(c) || c == '\u2028' || c == '\u00a7' || c == '\u202e')
+                && escaped.contains("\\u001B") && escaped.contains("\\u2028"), "archive-derived text is printable in messages");
+    }
+
+    private static void lossyFileNamesAreRefused() throws Exception {
+        BackupEngine engine = engine("lossy-names");
+        try { Files.writeString(engine.serverRoot().resolve("caf\uFFFD.txt"), "replacement character"); }
+        catch (InvalidPathException nonUtf8Locale) { System.out.println("SKIP lossy-name check: this JVM cannot create the fixture name"); return; }
+        try {
+            engine.createBackup("lossy");
+            throw new AssertionError("a lossy file name was archived");
+        } catch (IOException expected) {
+            check(expected.getMessage().contains("UTF-8 locale"), "lossy name refusal explains the locale fix");
+        }
+    }
+
+    private static void storeLockIsOwnerOnly() throws Exception {
+        Path base = Files.createDirectory(fixture.resolve("lock-permissions"));
+        Path root = Files.createDirectory(base.resolve("server"));
+        Path backups = Files.createDirectory(base.resolve("backups"));
+        if (!Files.getFileStore(backups).supportsFileAttributeView(PosixFileAttributeView.class)) return;
+        Files.setPosixFilePermissions(backups, PosixFilePermissions.fromString("rwxr-xr-x"));
+        Files.writeString(root.resolve("x"), "x");
+        BackupEngine engine = new BackupEngine(BackupOptions.defaults(root, backups, base.resolve("state")));
+        engine.createBackup("lock");
+        Path lock = backups.resolve(".vaultbackup.lock");
+        equal(Files.getPosixFilePermissions(lock), PosixFilePermissions.fromString("rw-------"), "new store lock is owner-only in a shared directory");
+        Files.setPosixFilePermissions(lock, PosixFilePermissions.fromString("rw-r--r--"));
+        engine.createBackup("tighten");
+        equal(Files.getPosixFilePermissions(lock), PosixFilePermissions.fromString("rw-------"), "an older readable store lock is tightened in place");
+    }
+
+    private static void retentionNeverPrefersSkewedClocks() throws Exception {
+        BackupEngine engine = engine("clock-skew");
+        Files.writeString(engine.serverRoot().resolve("x"), "skewed");
+        BackupRecord skewed = engine.createBackup("made-while-clock-ran-fast");
+        Properties metadata = new Properties();
+        try (InputStream input = Files.newInputStream(skewed.metadataPath())) { metadata.load(input); }
+        metadata.setProperty("createdAt", Instant.now().plusSeconds(86400).toString());
+        try (OutputStream output = Files.newOutputStream(skewed.metadataPath())) { metadata.store(output, "skewed fixture"); }
+        Files.writeString(engine.serverRoot().resolve("x"), "fresh");
+        BackupRecord fresh = engine.createBackup("fresh");
+        equal(engine.retain(1, Long.MAX_VALUE, Set.of(), fresh.id(), () -> false, ignored -> {}).stream().map(BackupRecord::id).toList(),
+                List.of(skewed.id()), "count retention never deletes the backup it just made because of a skewed clock");
+        equal(engine.listBackups().stream().map(BackupRecord::id).toList(), List.of(fresh.id()), "the new recovery point is kept");
+    }
+
+    private static void orphanedArchivesAreReclaimed() throws Exception {
+        BackupEngine engine = engine("orphans");
+        Files.writeString(engine.serverRoot().resolve("x"), "orphan");
+        BackupRecord orphan = engine.createBackup("orphan");
+        BackupRecord reserved = engine.createBackup("reserved-orphan");
+        BackupRecord linked = engine.createBackup("linked-sidecar");
+        BackupRecord kept = engine.createBackup("kept");
+        // State left by a crash or failed delete after the commit marker was withdrawn.
+        Files.delete(orphan.metadataPath());
+        Files.delete(reserved.metadataPath());
+        Path outside = Files.writeString(fixture.resolve("outside-sidecar.properties"), "not a sidecar");
+        Files.delete(linked.metadataPath());
+        boolean links = true;
+        try { Files.createSymbolicLink(linked.metadataPath(), outside); } catch (UnsupportedOperationException | IOException unavailable) { links = false; }
+        engine.retain(10, Long.MAX_VALUE, Set.of(reserved.id()), () -> false, ignored -> {});
+        check(!Files.exists(orphan.zipPath()), "an archive without its commit marker is reclaimed under the store lock");
+        check(Files.exists(reserved.zipPath()), "a reserved archive is never reclaimed");
+        if (links) check(Files.exists(linked.zipPath()), "an archive with any sidecar entry is left for inspection");
+        check(Files.exists(kept.zipPath()) && engine.listBackups().stream().anyMatch(r -> r.id().equals(kept.id())), "valid backups are untouched");
+        Files.delete(reserved.zipPath());
+        Files.writeString(engine.backupDirectory().resolve("notes.zip"), "operator file");
+        engine.delete(kept.id(), Set.of());
+        check(Files.exists(engine.backupDirectory().resolve("notes.zip")), "files without a backup ID name are never swept");
+    }
+
+    private static void deepPathsVerifyInLinearMemory() throws Exception {
+        BackupEngine engine = engine("deep-paths");
+        String id = "20260101T000000000Z-0123456789ab";
+        Path zip = engine.backupDirectory().resolve(id + ".zip");
+        Path metadata = engine.backupDirectory().resolve(id + ".properties");
+        List<Part> parts = new ArrayList<>();
+        StringBuilder manifest = new StringBuilder();
+        byte[] empty = new byte[0];
+        for (int i = 0; i < 200; i++) {
+            String name = String.format(Locale.ROOT, "u%05d", i) + "/a".repeat(1900) + "/f";
+            parts.add(new Part(name, empty));
+            manifest.append(line("F", name, 0, hash(empty)));
+        }
+        crafted(zip, metadata, parts, manifest.toString(), 0, parts.size());
+        long started = System.nanoTime();
+        equal(engine.verify(id).entryCount(), 200, "deep archive paths verify without quadratic ancestor storage");
+        check(System.nanoTime() - started < 60_000_000_000L, "deep archive verification stays fast");
+    }
+
+    private static void untrustedLabelsAndCorruptionAreReported() throws Exception {
+        BackupEngine engine = engine("labels");
+        Files.writeString(engine.serverRoot().resolve("x"), "label");
+        check(!BackupEngine.validLabel("manual\u2028forged line") && !BackupEngine.validLabel("\u00a7aGreen") && !BackupEngine.validLabel("bidi\u202e"),
+                "labels cannot carry line separators, formatting codes or bidi controls");
+        expectIOException(() -> engine.createBackup("forged\u2029line"), "API callers cannot create forging labels");
+        BackupRecord record = engine.createBackup("plain");
+        Properties metadata = new Properties();
+        try (InputStream input = Files.newInputStream(record.metadataPath())) { metadata.load(input); }
+        metadata.setProperty("label", "manual \u00a7aRestore helper outdated\u2028Download: https://example.invalid/fix");
+        try (OutputStream output = Files.newOutputStream(record.metadataPath())) { metadata.store(output, "forged label"); }
+        equal(engine.revalidateBackups(() -> false, ignored -> {}).size(), 0, "a sidecar with a forging label is not listed");
+        check(engine.rejectedBackups().containsKey(record.id()), "a rejected backup is reported with its reason");
+        metadata.setProperty("label", "plain");
+        try (OutputStream output = Files.newOutputStream(record.metadataPath())) { metadata.store(output, "restored label"); }
+        equal(engine.listBackups().size(), 1, "the restored sidecar verifies again");
+        check(engine.rejectedBackups().isEmpty(), "rejections are cleared once the archive verifies");
+    }
+
+    private static void storeBelongsToOneServer() throws Exception {
+        Path base = Files.createDirectory(fixture.resolve("shared-store"));
+        Path lobby = Files.createDirectory(base.resolve("lobby")), survival = Files.createDirectory(base.resolve("survival"));
+        Path backups = base.resolve("VaultBackup-backups");
+        new BackupEngine(BackupOptions.defaults(lobby, backups, base.resolve("lobby-state")));
+        check(Files.isRegularFile(backups.resolve(BackupEngine.OWNER_MARKER)), "the first server claims an unclaimed backup store");
+        new BackupEngine(BackupOptions.defaults(lobby, backups, base.resolve("lobby-state")));
+        try {
+            new BackupEngine(BackupOptions.defaults(survival, backups, base.resolve("survival-state")));
+            throw new AssertionError("a second server root shared the backup store");
+        } catch (IOException expected) {
+            check(expected.getMessage().contains("belongs to another server root"), "a sibling server sharing the default store is refused");
+        }
+        Files.write(backups.resolve(BackupEngine.OWNER_MARKER), new byte[0]);
+        new BackupEngine(BackupOptions.defaults(lobby, backups, base.resolve("lobby-state")));
+        check(Files.size(backups.resolve(BackupEngine.OWNER_MARKER)) > 0, "an empty marker left by a crash is claimed again");
     }
 
     private record Part(String name, byte[] data) { }

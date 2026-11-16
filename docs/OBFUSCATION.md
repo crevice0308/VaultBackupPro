@@ -1,6 +1,6 @@
 # Distribution obfuscation / 配布 JAR の難読化
 
-VaultBackup Pro 1.1.0 is free software under GPL-3.0-only. The complete, readable
+VaultBackup Pro 1.2.2 is free software under GPL-3.0-only. The complete, readable
 corresponding source, build scripts and these ProGuard rules belong in the public
 source release. Both executable distribution JARs use conservative name
 obfuscation. This is a packaging choice, not DRM, encryption, license enforcement,
@@ -21,10 +21,10 @@ only. Check `build.gradle` for the complete pinned build dependency configuratio
 1. Compile the readable source with Java 25 (`--release 25`).
 2. Build a plain, internal helper input from `core` and `restore` classes only.
 3. Run `proguard-restore.pro` and normalize its archive into the final standalone
-   `build/libs/vaultbackup-restore-1.1.0.jar`.
+   `build/libs/vaultbackup-restore-<version>.jar`.
 4. Build a plain, internal plugin input with resources, without an embedded helper.
 5. Run `proguard-plugin.pro`, then assemble
-   `build/libs/VaultBackupPro-1.1.0.jar` with the exact final standalone helper bytes
+   `build/libs/VaultBackupPro-<version>.jar` with the exact final standalone helper bytes
    stored at `vaultbackup-restore.jar`.
 
 Processing the two programs separately avoids duplicate-class handling or

@@ -1,0 +1,8 @@
+# Embedded resources must be byte-identical on every platform, so a Windows checkout
+# reproduces the published JAR hashes. Windows batch files need CRLF for cmd.exe.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.jar binary
+*.zip binary
+*.png binary

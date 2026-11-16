@@ -15,6 +15,10 @@ public final class RestoreArchive {
     private static final int MAX_ENTRIES = 1_000_000;
     private static final long MAX_ENTRY = 256L << 30, MAX_TOTAL = 1L << 40;
     private static final int MAX_MANIFEST = 128 * 1024 * 1024;
+    /** Windows-only name rules apply where the archive is materialized on Windows. */
+    static final boolean WINDOWS = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+    private static final java.util.regex.Pattern DEVICE = java.util.regex.Pattern.compile(
+            "CON|PRN|AUX|NUL|CONIN\\$|CONOUT\\$|COM[0-9\u00b9\u00b2\u00b3]|LPT[0-9\u00b9\u00b2\u00b3]");
     public record Entry(String path, boolean directory, long size, String sha256) {}
     public record Verified(List<Entry> entries, long totalBytes, String manifestSha256) {
         public Verified { entries = List.copyOf(entries); }
@@ -54,13 +58,21 @@ public final class RestoreArchive {
                 boolean directory = ze.isDirectory();
                 if (directory) name = name.substring(0, name.length() - 1);
                 validatePath(name);
-                if (!seen.add(name) || !folded.add(java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFC).toLowerCase(Locale.ROOT))) throw new IOException("Duplicate or case-colliding ZIP path: " + name);
+                if (!seen.add(name) || !folded.add(java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFC).toLowerCase(Locale.ROOT))) throw new IOException("Duplicate or case-colliding ZIP path: " + printable(name));
                 Entry e = expected.get(name);
-                if (e == null || e.directory() != directory) throw new IOException("Unmanifested or type-mismatched entry: " + name);
-                Path target = destination == null ? null : destination.resolve(name).normalize();
+                if (e == null || e.directory() != directory) throw new IOException("Unmanifested or type-mismatched entry: " + printable(name));
+                // Every name must be representable on this host before the server is ever stopped:
+                // reservation-time verification runs this same check without a destination.
+                Path target;
+                try {
+                    Path probe = archive.getFileSystem().getPath(name);
+                    target = destination == null ? null : destination.resolve(probe).normalize();
+                } catch (InvalidPathException unrepresentable) {
+                    throw new IOException("Archive path cannot be created on this host (file-name encoding " + System.getProperty("sun.jnu.encoding") + "): " + printable(name), unrepresentable);
+                }
                 if (target != null && !target.startsWith(destination)) throw new IOException("Unsafe target path");
                 if (directory) { if (ze.getSize()!=0) throw new IOException("Nonempty directory ZIP entry"); if (target != null) Files.createDirectories(target); continue; }
-                if (ze.getSize() != e.size()) throw new IOException("ZIP/manifest size mismatch: " + name);
+                if (ze.getSize() != e.size()) throw new IOException("ZIP/manifest size mismatch: " + printable(name));
                 MessageDigest digest = RestoreFiles.digest(); long size = 0;
                 if (target != null) Files.createDirectories(target.getParent());
                 try (InputStream in = zip.getInputStream(ze); OutputStream out = target == null ? OutputStream.nullOutputStream()
@@ -71,7 +83,7 @@ public final class RestoreArchive {
                         digest.update(buffer,0,n); out.write(buffer,0,n);
                     }
                 }
-                if (size != e.size() || !HexFormat.of().formatHex(digest.digest()).equals(e.sha256())) throw new IOException("Entry digest mismatch: " + name);
+                if (size != e.size() || !HexFormat.of().formatHex(digest.digest()).equals(e.sha256())) throw new IOException("Entry digest mismatch: " + printable(name));
                 if (target != null) try (var channel = java.nio.channels.FileChannel.open(target, StandardOpenOption.WRITE)) { channel.force(true); }
             }
             if (seen.size() != expected.size() + 1) throw new IOException("Manifest entries are missing from archive");
@@ -113,45 +125,90 @@ public final class RestoreArchive {
             total=Math.addExact(total,size); if(total>MAX_TOTAL) throw new IOException("Archive too large");
             entries.add(new Entry(path,dir,size,f[2])); types.put(path,dir);
         }
-        Map<String,String> spellings = new HashMap<>(); Set<String> fileKeys = new HashSet<>(), directoryKeys = new HashSet<>();
+        // One node per distinct (parent, portable component): full ancestor prefixes would make
+        // memory quadratic in path depth for a small crafted manifest of deep paths.
+        Map<String,Integer> nodes = new HashMap<>(); List<String> spellings = new ArrayList<>(); BitSet fileNodes = new BitSet(), directoryNodes = new BitSet();
         for(Entry e:entries) {
-            StringBuilder prefix = new StringBuilder(); String[] components=e.path().split("/");
+            String[] components=e.path().split("/"); int parent=0;
             for(int i=0;i<components.length;i++) {
-                if(i>0)prefix.append('/'); prefix.append(components[i]); String spelling=prefix.toString();
-                String key=java.text.Normalizer.normalize(spelling,java.text.Normalizer.Form.NFC).toLowerCase(Locale.ROOT);
-                String previous=spellings.putIfAbsent(key,spelling);
-                if(previous!=null && !previous.equals(spelling))throw new IOException("Case/Unicode alias in ancestor path");
-                if(i<components.length-1 || e.directory()) {if(fileKeys.contains(key))throw new IOException("File/directory ancestor conflict");directoryKeys.add(key);}
-                else {if(directoryKeys.contains(key))throw new IOException("File/directory ancestor conflict");fileKeys.add(key);}
+                String key=parent+"/"+java.text.Normalizer.normalize(components[i],java.text.Normalizer.Form.NFC).toLowerCase(Locale.ROOT);
+                Integer node=nodes.get(key);
+                if(node==null){spellings.add(components[i]);node=spellings.size();nodes.put(key,node);}
+                else if(!spellings.get(node-1).equals(components[i]))throw new IOException("Case/Unicode alias in ancestor path");
+                if(i<components.length-1 || e.directory()) {if(fileNodes.get(node))throw new IOException("File/directory ancestor conflict");directoryNodes.set(node);}
+                else {if(directoryNodes.get(node))throw new IOException("File/directory ancestor conflict");fileNodes.set(node);}
+                parent=node;
             }
         }
         return new Verified(entries,total,HexFormat.of().formatHex(RestoreFiles.digest().digest(bytes)));
     }
-    public static void validatePath(String path) throws IOException {
-        if(path.isEmpty() || path.length()>4096 || path.startsWith("/") || path.contains("\\") || path.indexOf(':')>=0 || path.split("/",2)[0].equalsIgnoreCase(MANIFEST)) throw new IOException("Unsafe archive path: "+path);
+    /** Identical to BackupEngine.validateEntryPath; kept separate so the helper stays standalone. */
+    public static void validatePath(String path) throws IOException { validatePath(path, WINDOWS); }
+    public static void validatePath(String path, boolean windowsRules) throws IOException {
+        if(path.isEmpty() || path.length()>4096 || path.startsWith("/") || path.contains("\\") || path.split("/",2)[0].equalsIgnoreCase(MANIFEST)
+                || path.chars().anyMatch(Character::isISOControl)) throw new IOException("Unsafe archive path: "+printable(path));
+        for(int i=0;i<path.length();i++) {
+            char c=path.charAt(i);
+            if(Character.isHighSurrogate(c) && i+1<path.length() && Character.isLowSurrogate(path.charAt(i+1))){i++;continue;}
+            if(Character.isSurrogate(c))throw new IOException("Archive path is not valid Unicode: "+printable(path));
+        }
+        // Names that were already lossy when archived (U+FFFD) would restore as different files.
+        if(path.indexOf('\uFFFD')>=0) throw new IOException("Archive path contains a file name that was not stored losslessly: "+printable(path));
         for(String part:path.split("/",-1)) {
-            if(part.isEmpty() || part.equals(".") || part.equals("..") || part.endsWith(".") || part.endsWith(" ") || part.chars().anyMatch(c->Character.isISOControl(c) || "<>\"|?*".indexOf(c)>=0)) throw new IOException("Unsafe archive path");
-            String base=part.split("\\.",2)[0].toUpperCase(Locale.ROOT);
-            if(base.matches("CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]")) throw new IOException("Platform-reserved archive path");
+            if(part.isEmpty() || part.equals(".") || part.equals("..")) throw new IOException("Unsafe archive path: "+printable(path));
+            if(!windowsRules) continue;
+            if(part.endsWith(".") || part.endsWith(" ") || part.chars().anyMatch(c->"<>:\"|?*".indexOf(c)>=0)) throw new IOException("Name is not valid on Windows: "+printable(path));
+            String base=part.split("\\.",2)[0].replaceAll(" +$","").toUpperCase(Locale.ROOT);
+            if(DEVICE.matcher(base).matches()) throw new IOException("Platform-reserved archive path: "+printable(path));
         }
     }
-    public static void verifyInstalled(Path root, Verified archive) throws IOException {
-        RestoreFiles.directory(root,false); Map<String,Entry> files=new HashMap<>(); Set<String> dirs=new HashSet<>();
-        for(Entry e:archive.entries()) {
-            if(e.directory()) dirs.add(e.path()); else files.put(e.path(),e);
-            String p=e.path(); int slash; while((slash=p.lastIndexOf('/'))>=0) {p=p.substring(0,slash); dirs.add(p);}
+    /** Control, format and line-separator characters become visible escapes in messages. */
+    static String printable(String value) {
+        StringBuilder out=new StringBuilder(); int count=0;
+        for(int i=0;i<value.length();) {
+            int c=value.codePointAt(i); i+=Character.charCount(c);
+            if(++count>512){out.append("...");break;}
+            int type=Character.getType(c);
+            if(c=='\u00a7' || Character.isISOControl(c) || type==Character.LINE_SEPARATOR || type==Character.PARAGRAPH_SEPARATOR
+                    || type==Character.FORMAT || type==Character.SURROGATE) out.append(String.format(Locale.ROOT,"\\u%04X",c));
+            else out.appendCodePoint(c);
         }
-        Set<String> foundFiles=new HashSet<>(), foundDirs=new HashSet<>();
+        return out.toString();
+    }
+    /** One expected node per archive path component; memory stays linear in the manifest size. */
+    private static final class Node {
+        final Map<String,Node> children=new HashMap<>(); Entry file; boolean found;
+    }
+    public static void verifyInstalled(Path root, Verified archive) throws IOException {
+        RestoreFiles.directory(root,false); Node top=new Node(); List<Node> all=new ArrayList<>();
+        for(Entry e:archive.entries()) {
+            String[] components=e.path().split("/"); Node node=top;
+            for(int i=0;i<components.length;i++) {
+                Node child=node.children.get(components[i]);
+                if(child==null){child=new Node();node.children.put(components[i],child);all.add(child);}
+                node=child;
+            }
+            if(!e.directory()) node.file=e;
+        }
+        Deque<Node> stack=new ArrayDeque<>();
         Files.walkFileTree(root,new SimpleFileVisitor<>() {
             @Override public FileVisitResult preVisitDirectory(Path dir,BasicFileAttributes attrs)throws IOException {
-                if(!dir.equals(root)) {String p=root.relativize(dir).toString().replace(File.separatorChar,'/'); if(!dirs.contains(p)) throw new IOException("Unexpected installed directory: "+p);foundDirs.add(p);}return FileVisitResult.CONTINUE;
+                if(dir.equals(root)){stack.push(top);return FileVisitResult.CONTINUE;}
+                Node node=stack.peek().children.get(dir.getFileName().toString());
+                if(node==null || node.file!=null || attrs.isSymbolicLink()) throw new IOException("Unexpected installed directory: "+printable(root.relativize(dir).toString()));
+                node.found=true; stack.push(node); return FileVisitResult.CONTINUE;
+            }
+            @Override public FileVisitResult postVisitDirectory(Path dir,IOException exception)throws IOException {
+                if(exception!=null) throw exception;
+                stack.pop(); return FileVisitResult.CONTINUE;
             }
             @Override public FileVisitResult visitFile(Path file,BasicFileAttributes attrs)throws IOException {
-                String p=root.relativize(file).toString().replace(File.separatorChar,'/'); Entry e=files.get(p);
-                if(e==null || !attrs.isRegularFile() || attrs.isSymbolicLink() || attrs.size()!=e.size() || !RestoreFiles.sha(file).equals(e.sha256())) throw new IOException("Installed data did not verify: "+p);
-                foundFiles.add(p); return FileVisitResult.CONTINUE;
+                String p=root.relativize(file).toString().replace(File.separatorChar,'/');
+                Node node=stack.peek().children.get(file.getFileName().toString()); Entry e=node==null?null:node.file;
+                if(e==null || !attrs.isRegularFile() || attrs.isSymbolicLink() || attrs.size()!=e.size() || !RestoreFiles.sha(file).equals(e.sha256())) throw new IOException("Installed data did not verify: "+printable(p));
+                node.found=true; return FileVisitResult.CONTINUE;
             }
         });
-        if(!foundFiles.equals(files.keySet()) || !foundDirs.equals(dirs)) throw new IOException("Installed tree is incomplete");
+        for(Node node:all) if(!node.found) throw new IOException("Installed tree is incomplete");
     }
 }

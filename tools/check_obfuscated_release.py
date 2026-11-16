@@ -89,6 +89,21 @@ def inspect_jar(path: Path, classes: dict[str, str], helper: bool) -> dict:
             "renamed_classes": renamed_count, "java_class_major": 69}
 
 
+def require_release_version(plugin: Path, helper: Path) -> None:
+    """The JAR names, plugin.yml, the build and both restore wrappers must agree on one version."""
+    with zipfile.ZipFile(plugin) as jar:
+        declared = re.search(r"^version:\s*'?([^'\s]+)'?\s*$", jar.read("plugin.yml").decode("utf-8"), re.M)
+    require(declared is not None, "plugin.yml has no version")
+    version = declared.group(1)
+    require(plugin.name == f"VaultBackupPro-{version}.jar", f"Plugin JAR name does not match plugin.yml version {version}")
+    require(helper.name == f"vaultbackup-restore-{version}.jar", f"Helper JAR name does not match plugin.yml version {version}")
+    require(re.search(rf"^version = '{re.escape(version)}'$", (ROOT / "build.gradle").read_text(encoding="utf-8"), re.M) is not None,
+            "build.gradle version differs from plugin.yml")
+    for wrapper in ("helpers/restore.sh", "helpers/restore.cmd"):
+        named = set(re.findall(r"vaultbackup-restore-[0-9][0-9A-Za-z.+-]*\.jar", (ROOT / wrapper).read_text(encoding="utf-8")))
+        require(named == {helper.name}, f"{wrapper} must name exactly {helper.name}, found {sorted(named)}")
+
+
 def java_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=True)
 
@@ -190,8 +205,9 @@ public final class VerifyRelease {{
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--plugin", type=Path, default=ROOT / "build/libs/VaultBackupPro-1.2.1.jar")
-    parser.add_argument("--helper", type=Path, default=ROOT / "build/libs/vaultbackup-restore-1.2.1.jar")
+    # No version-bearing defaults: a stale JAR of an earlier version must never be checked.
+    parser.add_argument("--plugin", type=Path, required=True)
+    parser.add_argument("--helper", type=Path, required=True)
     parser.add_argument("--plugin-mapping", type=Path, required=True)
     parser.add_argument("--helper-mapping", type=Path, required=True)
     parser.add_argument("--java-home", type=Path, default=Path(os.environ.get("JAVA_HOME", "")))
@@ -202,6 +218,7 @@ def main() -> None:
     java = args.java_home.resolve() / "bin" / ("java.exe" if os.name == "nt" else "java")
     require(java.is_file(), "--java-home / JAVA_HOME must identify a JDK 25 installation")
     plugin, helper = args.plugin.resolve(), args.helper.resolve()
+    require_release_version(plugin, helper)
     pm, pmm = mapping(args.plugin_mapping)
     hm, hmm = mapping(args.helper_mapping)
     result = {"plugin": inspect_jar(plugin, pm, False), "helper": inspect_jar(helper, hm, True)}

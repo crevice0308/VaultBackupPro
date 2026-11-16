@@ -1,5 +1,6 @@
 .github/scripts/setup-java25.sh
 .github/workflows/ci.yml
+.gitattributes
 .gitignore
 BUILDING.md
 CHANGELOG.md

@@ -15,8 +15,7 @@ final class RestoreJobState {
     }
     static Gate lock(Path dir, Duration timeout) throws IOException {
         RestoreFiles.directory(dir, false);
-        FileChannel channel=FileChannel.open(dir.resolve("job.lock"), StandardOpenOption.CREATE,
-                StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+        FileChannel channel=RestoreFiles.openLockFile(dir.resolve("job.lock"));
         long deadline=System.nanoTime()+timeout.toNanos();
         try {
             do {
@@ -81,18 +80,40 @@ final class RestoreJobState {
         p.setProperty("authentication",RestoreFiles.hmac(RestoreFiles.required(job,"nonce"),processPayload(p)));
         RestoreFiles.write(dir.resolve("helper-process.properties"),p);
     }
+    /**
+     * True only with positive proof that no helper for this job is alive. The recorded PID is the
+     * first proof; when it is missing (a crash between publishing the reservation and recording
+     * the launch) or its identity is uncertain, an uncontended helper.lock is the second: every
+     * helper holds it for its whole run, from before its first job-gate check.
+     */
     static boolean confirmedDead(Path dir,Properties job)throws IOException {
-        Path file=dir.resolve("helper-process.properties");if(!Files.exists(file,RestoreFiles.NOFOLLOW))return false;
+        Path file=dir.resolve("helper-process.properties");
+        if(!Files.exists(file,RestoreFiles.NOFOLLOW))return helperLockFree(dir,job);
         Properties p=RestoreFiles.load(file);
         if(!RestoreFiles.required(job,"jobId").equals(RestoreFiles.required(p,"jobId"))
                 || !RestoreFiles.constantEquals(RestoreFiles.required(p,"authentication"),RestoreFiles.hmac(RestoreFiles.required(job,"nonce"),processPayload(p))))throw new IOException("Helper process identity is unauthenticated");
         try {
             long pid=Long.parseLong(RestoreFiles.required(p,"pid"));Instant started=Instant.parse(RestoreFiles.required(p,"startedAt"));
-            Optional<ProcessHandle> process=ProcessHandle.of(pid);if(process.isEmpty())return true;
+            Optional<ProcessHandle> process=ProcessHandle.of(pid);if(process.isEmpty() || RestoreFiles.threadOfAnotherProcess(pid) || RestoreFiles.exitedButUnreaped(pid))return true;
             Optional<Instant> actual=process.get().info().startInstant();
-            if(actual.isEmpty() || !actual.get().equals(started))throw new IOException("Helper PID identity is uncertain or reused; cancellation is not acknowledged");
-            return !process.get().isAlive();
+            if(actual.isPresent() && actual.get().equals(started))return !process.get().isAlive();
+            if(actual.isPresent() && RestoreFiles.reusedAfter(actual.get(),started,job,false))return true;
+            if(helperLockFree(dir,job))return true;
+            throw new IOException("Helper PID identity is uncertain or reused; cancellation is not acknowledged");
         }catch(RuntimeException e){throw new IOException("Invalid helper process identity",e);}
+    }
+    /** Format-2 helpers take helper.lock before any job-gate check and hold it until they exit. */
+    static boolean helperLockFree(Path dir,Properties job)throws IOException {
+        if(!"2".equals(job.getProperty("formatVersion")))return false;
+        FileChannel channel=RestoreFiles.openLockFile(dir.resolve("helper.lock"));
+        FileLock lock;
+        try {lock=channel.tryLock();}
+        catch(OverlappingFileLockException heldByThisJvm) {
+            // Closing another channel can release this JVM's own lock on some platforms.
+            RestoreRootLease.retainChannelUntilExit(channel);return false;
+        } catch(IOException | RuntimeException e) {channel.close();throw e;}
+        try {return lock!=null;}
+        finally {try{if(lock!=null)lock.release();}finally{channel.close();}}
     }
     private static String processPayload(Properties p)throws IOException {
         return String.join("\n",RestoreFiles.required(p,"jobId"),RestoreFiles.required(p,"pid"),RestoreFiles.required(p,"startedAt"));
