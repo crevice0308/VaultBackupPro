@@ -1,5 +1,11 @@
 # Direct-action 1.2.0 real-server regression harness
 
+> **Status for 1.3.0: not updated and not re-run.** This harness was written for the 1.2.0 release and is kept as the record of how the 1.2.0 real-server results were produced. It has not been adapted to 1.3.0 and was not run against it. No real-server test was run for 1.3.0, because running a Minecraft server requires accepting the Minecraft EULA.
+>
+> The scripts cannot be used against a 1.3.0 JAR as they stand. They require the frozen obfuscated VaultBackupPro-1.2.0.jar and install it under that file name, accept only run tags beginning with `direct-120`, pin the SHA-256 of particular server builds and the JDK version string, and expect 1.2.0 console output such as the `VaultBackup Pro 1.2.0` startup line. Their expectations have not been checked against the messages and behaviour that changed in 1.3.0 (no obfuscation, Brigadier commands on Paper and Purpur, saving through `minecraft:save-all flush`, files that change during a backup, `/backup list` and `/backup verify`, the default exclusions, shutdown detection). The older scripts in this directory (`manualstop_*`, `confirmed_delete_*`) pin 1.0.0 and 1.1.0 in the same way.
+>
+> Everything below describes the 1.2.0 procedure. Updating the harness for 1.3.0 is open work.
+
 Use only newly created disposable test directories. Never point this harness at a production server or real user files. All fixture worlds bind to127.0.0.1, disable authentication, allow at most two players, and use small flat worlds. Do not expose these ports to a network. No actual players are used.
 
 ## Prerequisites

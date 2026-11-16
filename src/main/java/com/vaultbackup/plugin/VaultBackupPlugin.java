@@ -517,6 +517,8 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         if (busy()) {
             // Nothing is known before the store has been read once: do not present that as "no backups".
             if (!catalogueLoaded) { if (sender != null) tell(sender,text("list.loading"),false); return; }
+            // A complete re-verification cannot run beside another job, and is never reported as done when it did not run.
+            if (revalidate && sender != null) { tell(sender,text("job.busy",operation()),false); return; }
             // Read-only navigation remains available while the I/O worker owns a mutation.
             if (sender != null) tell(sender,text("list.cached"),true);
             if (after != null) after.run();

@@ -1,5 +1,11 @@
 # VaultBackup Pro 1.1.0 confirmed-last-delete runtime regression
 
+> **Status for 1.3.0: not updated and not re-run.** The harness in this directory was last updated for the 1.2.0 release; the scripts described in this file are older still and target 1.1.0. Nothing here has been adapted to 1.3.0 or run against it. No real-server test was run for 1.3.0, because running a Minecraft server requires accepting the Minecraft EULA.
+>
+> These scripts cannot be used against a 1.3.0 JAR as they stand. They pin the VaultBackupPro-1.1.0.jar file name, the SHA-256 of particular server builds, run tags beginning with `last-delete-110`, and 1.1.0 console output. They also test the deletion and restore confirmation steps of 1.1.0, which were removed in 1.2.0: since then deletion and restore reservation run without a second confirmation, and the last backup can be deleted. See `README.md` in this directory for the state of the 1.2.0 harness.
+>
+> Everything below describes the 1.1.0 procedure and is kept as a historical record.
+
 These tests use newly copied, isolated, localhost-only server fixtures. They deliberately delete **only generated test backups**, move one generated sibling archive to a quarantine directory to simulate stale state, and temporarily deny writes to the test archive directory to verify unexpected-I/O diagnostics. Do not use a production directory or personal world.
 
 Read the existing `README.md` for official server provenance, Java 25, EULA, proxy, and fixture preparation requirements. Explicit Minecraft EULA acceptance is required before setting `VAULTBACKUP_TEST_EULA_ACCEPTED=true`. No Minecraft server binaries or worlds are included in the distribution.

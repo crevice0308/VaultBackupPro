@@ -200,6 +200,8 @@ public final class DeleteWorkflowTest {
             check(io.queue.size()==1 && contains(messages,"Another operation"),"repeated target action cannot queue a second mutation");
             commands.onCommand(sender,null,"backup",new String[]{"list"});
             check(io.queue.size()==1 && contains(messages,"last verified catalogue") && contains(messages,first.id()),"busy list uses cached catalogue");
+            messages.clear();commands.onCommand(sender,null,"backup",new String[]{"verify"});
+            check(io.queue.size()==1 && contains(messages,"Another operation") && !contains(messages,"re-verified") && !contains(messages,"Re-verified"),"a re-verification that cannot run is never reported as done");
             commands.onCommand(sender,null,"backup",new String[]{"status"});
             commands.onCommand(sender,null,"backup",new String[]{"help"});
             check(contains(messages,"Deleting backup") && contains(messages,"VaultBackup Pro 9.9.9-fixture commands"),"status and help stay readable while busy");

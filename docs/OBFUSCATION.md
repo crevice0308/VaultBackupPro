@@ -1,161 +1,77 @@
-# Distribution obfuscation / 配布 JAR の難読化
+# Obfuscation removed / 難読化の廃止
 
-VaultBackup Pro 1.1.0 is free software under GPL-3.0-only. The complete, readable
-corresponding source, build scripts and these ProGuard rules belong in the public
-source release. Both executable distribution JARs use conservative name
-obfuscation. This is a packaging choice, not DRM, encryption, license enforcement,
-a secrecy guarantee, or a restriction on the freedoms granted by the license.
-There is no activation server or runtime ProGuard dependency.
+Since VaultBackup Pro 1.3.0 the distributed plugin and restore helper JARs are built
+directly from the published source. They are not obfuscated, shrunk, optimized or
+otherwise post-processed. Releases 1.1.0 to 1.2.1 were name-obfuscated with
+ProGuard 7.10.0; that tool and the `proguard-*.pro` rule files were removed from
+the build in 1.3.0. This document keeps its file name because other documents and
+earlier releases refer to it. The real-server results in RUNTIME-TEST-RESULTS.md and
+docs/test-evidence were measured with an obfuscated build and do not cover 1.3.0.
 
-配布用のプラグインと復元ヘルパーは名前を難読化します。読みやすい完全なソースと
-ビルド設定は GPLv3 の対応ソースとして公開します。難読化は暗号化や DRM ではなく、
-秘密情報を保護する機能でもありません。
+1.3.0 以降、配布するプラグインと復元ヘルパーの JAR は、公開しているソースをそのまま
+ビルドしたものです。難読化・縮小・最適化などの後処理はしていません。1.1.0〜1.2.1 は
+ProGuard 7.10.0 で名前を難読化していましたが、1.3.0 で ProGuard と proguard-*.pro を
+ビルドから削除しました。
 
-## Build design
+## Why obfuscation was removed / 廃止の理由
 
-Use the JDK 25 toolchain and the pinned Gradle wrapper described in
-[BUILDING.md](../BUILDING.md). ProGuard is pinned to the official
-`com.guardsquare:proguard-base:7.10.0` build tool. Its dependencies are build-time
-only. Check `build.gradle` for the complete pinned build dependency configuration.
+1. Hangar, PaperMC's official plugin distribution site, does not accept obfuscated
+   plugins.
+2. The plugin uses only the public Paper and Spigot APIs. It no longer reaches into
+   server internals, and nothing in it needs to be hidden. The source has always been
+   public under GPL-3.0-only, so obfuscation never kept anything secret.
+3. Without obfuscation, users can check more easily that a JAR corresponds to the
+   source: the class names in the JAR are the ones in the source tree, and a rebuild
+   can be compared with the published hashes.
 
-1. Compile the readable source with Java 25 (`--release 25`).
-2. Build a plain, internal helper input from `core` and `restore` classes only.
-3. Run `proguard-restore.pro` and normalize its archive into the final standalone
-   `build/libs/vaultbackup-restore-1.1.0.jar`.
-4. Build a plain, internal plugin input with resources, without an embedded helper.
-5. Run `proguard-plugin.pro`, then assemble
-   `build/libs/VaultBackupPro-1.1.0.jar` with the exact final standalone helper bytes
-   stored at `vaultbackup-restore.jar`.
+1. PaperMC の公式プラグイン配布サイト Hangar は、難読化したプラグインを認めていません。
+2. プラグインは Paper と Spigot の公開 API だけを使い、サーバー内部には触れません。
+   隠す対象がありません。
+3. 難読化がなければ、利用者がソースと JAR の対応を確認しやすくなります。
 
-Processing the two programs separately avoids duplicate-class handling or
-accidental recursive processing of the embedded JAR. Their symbol maps need not
-match: they communicate through explicitly named files/fields and a child-JVM
-command line, not by exchanging Java object instances.
+## What the build does now
 
-Mappings are generated only below `build/obfuscated/`:
+See [BUILDING.md](../BUILDING.md) for the commands and requirements.
 
-- `plugin-mapping.txt`
-- `restore-mapping.txt`
+- `build/libs/vaultbackup-restore-1.3.0.jar` contains the compiled `core` and
+  `restore` packages and the license files. It is the standalone helper.
+- `build/libs/VaultBackupPro-1.3.0.jar` contains the compiled classes of `src/main`
+  and `src/paper`, the resources, the license files and the helper above, embedded
+  unchanged as `vaultbackup-restore.jar`.
+- Archive tasks write no file timestamps and use a fixed file order, so that a JAR
+  does not vary with the time of the build or the order in which files were found.
+- No mapping files, rule files or intermediate JARs exist any more. `revision.txt`
+  inside the plugin JAR states `Artifacts: plain (not obfuscated)`.
 
-They are local build diagnostics and are not embedded in either executable or
-copied into the public release packages. Do not add them, dependency caches, JDK
-library images, or unprocessed intermediate JARs to the publication allowlist.
-The public source and public rules let recipients build their own executable and
-produce their own mappings. Keeping a maintainer's mapping out of a distribution
-does not make the implementation secret.
+## How to check that a JAR corresponds to the source / 確認方法
 
-## Conservative rules and compatibility boundaries
-
-`proguard-common.pro` disables shrinking and optimization. It retains package
-boundaries, normal Java verification, runtime annotations, generic/nesting
-metadata, record metadata, and diagnostic line numbers. It preserves record
-component field and accessor names together while permitting record class names
-to change. Enum lookup methods and declared serialization hooks are retained.
-Source filename attributes are normalized to `SourceFile`.
-
-The rules preserve these externally discovered entrypoints and callbacks:
-
-- `com.vaultbackup.plugin.VaultBackupPlugin`, its public no-argument constructor,
-  and JavaPlugin lifecycle methods. `plugin.yml` keeps the same `main` value.
-- Bukkit `@EventHandler` methods, including annotation metadata.
-- Command execution, tab completion and inventory-holder interface methods.
-- `com.vaultbackup.restore.RestoreMain.main(String[])`, matching the standalone
-  helper's manifest `Main-Class`.
-
-Other implementation symbols remain eligible for renaming. No global warning
-suppression, string rewriting, aggressive method overloading, access expansion,
-or verification disabling is enabled. The optional Folia class-presence probe
-has a narrowly scoped informational-note suppression only.
-
-The source audit found these dynamic/persistence boundaries:
-
-- `ServerLifecycle` reflectively resolves external `getServer`, `saveEverything`
-  and `hasStopped` server methods. Their string literals are not rewritten, and
-  no server implementation classes are program inputs.
-- The optional `io.papermc.paper.threadedregions.RegionizedServer` lookup is a
-  runtime rejection check; Folia is not made a build dependency.
-- Message files use absolute `/messages/ja_JP.properties` and
-  `/messages/en_US.properties` resource paths. These paths and contents stay fixed.
-- Backup metadata, archive manifests, restore jobs, journals and authentication
-  fields are explicitly encoded as textual fields. They do not use reflective
-  object-to-JSON mapping or Java object serialization. No application-owned
-  `ServiceLoader` provider registrations exist in this version.
-- Job authentication secrets remain runtime secrets in protected job files;
-  obfuscation does not encrypt or conceal them.
-
-Adding reflection, serializers, native methods, a stable third-party Java API,
-or service providers requires a fresh rule review and post-obfuscation tests.
-Keeping generic serialization hooks alone does not guarantee compatibility of
-persisted Java-serialized objects across builds.
-
-## Library inputs
-
-Never process the server API, Java runtime or ProGuard's own dependencies as
-program input. Libraries describe inheritance and method signatures; they are
-not copied into the output.
-
-Preferred inputs for a full JDK installation are:
-
-- Plugin: the exact resolved Gradle `compileClasspath`, including the pinned
-  Spigot API and all its transitive compile dependencies, plus the selected
-  Java 25 toolchain's runtime libraries.
-- Helper: only that Java 25 runtime. It must have no server API dependency.
-
-For JDK 25 distributions with `jmods/`, supply each matching `*.jmod` as a separate
-library entry with `(!**.jar;!module-info.class)`, for example:
+- `release/SHA256SUMS.txt` records the SHA-256 of the two release JARs.
+- CI (`.github/workflows/ci.yml`) rebuilds both JARs from a clean checkout with a
+  checksum-pinned JDK and fails unless they have exactly the recorded hashes.
+- To repeat that locally, build with the same JDK build as CI (see
+  `.github/scripts/setup-java25.sh`) and compare:
 
 ```
--libraryjars /path/to/jdk-25/jmods/java.base.jmod(!**.jar;!module-info.class)
--libraryjars /path/to/jdk-25/jmods/java.logging.jmod(!**.jar;!module-info.class)
--libraryjars /path/to/jdk-25/jmods/java.net.http.jmod(!**.jar;!module-info.class)
+bash gradlew --no-daemon clean release check
+(cd build/libs && sha256sum --check ../../release/SHA256SUMS.txt)
 ```
 
-These three illustrate direct application dependencies; use the complete module
-set rather than guessing the transitive closure of the Spigot API. Do not use
-Java 21 libraries to process Java 25 classes.
+A different JDK build or platform can produce different bytes. Matching hashes show
+that the JAR is the one this source produces; they are not a statement about how the
+plugin behaves on a server. `tools/check_release.py`, run by the `releaseCheck` task,
+additionally checks the contents of both JARs: only this project's classes, Java 25
+bytecode, the license files, no source or build files, and an embedded helper that is
+byte-identical to the standalone one.
 
-Some JDK distributions contain `lib/modules` and `bin/jimage`, but no `jmods/`.
-For that layout, the build may extract the matching toolchain's runtime image
-with its `jimage` tool and construct a temporary library-only JAR from the module
-contents, excluding every module descriptor. It must stay in local build/tool
-storage, never a release archive. It describes the same toolchain runtime; it is
-not a replacement JDK shipped to users. See the build script for its actual
-module-input selection.
+release/SHA256SUMS.txt に 2 つの配布 JAR の SHA-256 を記録しています。CI は毎回
+クリーンな状態からビルドし直し、JAR のハッシュがこの記録と一致しなければ失敗します。
+手元で確認する場合は、CI と同じ JDK でビルドしてハッシュを照合してください。
 
-## Verify the final distribution bytes
+## Earlier releases
 
-`tools/check_obfuscated_release.py` checks the actual final JARs rather than the
-unprocessed classes. Give it the two build-local mappings, the JDK path, and the
-resolved Spigot compile classpath:
-
-```
-python3 tools/check_obfuscated_release.py \
-  --java-home "$JAVA_HOME" \
-  --compile-classpath "<resolved compileClasspath, platform-separated>" \
-  --plugin-mapping build/obfuscated/plugin-mapping.txt \
-  --helper-mapping build/obfuscated/restore-mapping.txt
-```
-
-It checks Java 25 classfile versions, real symbol renaming, expected resources,
-notices, entrypoint names, duplicate ZIP entries, absence of shaded dependencies
-and mapping/source files, and byte identity between the embedded and standalone
-helper. Java runs with `-Xverify:all` to load and reflect over distribution classes,
-check record component/accessor correspondence, exercise record bootstrap
-`equals`/`hashCode`/`toString` and enum lookup, inspect Bukkit callback annotations,
-and load both message languages. The standalone helper must reject missing
-arguments with exit code 2. The report defaults to
-`build/reports/obfuscation-verification.json`.
-
-These are structural and targeted execution checks. They do not establish live
-server compatibility, backup correctness or restore safety on their own. Run the
-normal assertion harnesses, the restore harness against the final helper, and
-real-server acceptance tests against the exact final plugin JAR. Rerun affected
-tests after source, rule, dependency or packaging changes. Consult
-[TEST-RESULTS.md](../TEST-RESULTS.md) for the release's recorded results and limits.
-
-## Tool documentation
-
-- [Official ProGuard release history](https://www.guardsquare.com/manual/releasenotes)
-- [Library inputs and keep options](https://www.guardsquare.com/manual/configuration/usage)
-- [Class-file attributes](https://www.guardsquare.com/manual/configuration/attributes)
-- [Entrypoints, callbacks and enum examples](https://www.guardsquare.com/manual/configuration/examples)
+Releases 1.1.0, 1.2.0 and 1.2.1 remain as published: obfuscated JARs with the
+matching readable source and ProGuard rules in their source archives. The real-server
+results in [RUNTIME-TEST-RESULTS.md](RUNTIME-TEST-RESULTS.md) were measured with the
+obfuscated 1.2.0 JAR and do not cover 1.3.0. See
+[TEST-RESULTS.md](../TEST-RESULTS.md) for the recorded results and limits of the
+current release.

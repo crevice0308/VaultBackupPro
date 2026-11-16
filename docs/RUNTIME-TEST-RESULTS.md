@@ -1,6 +1,8 @@
 # VaultBackup Pro 1.2.0 runtime results
 
-> These real-server results belong to the 1.2.0 final JAR listed below. They were not re-run for 1.2.1; see TEST-RESULTS.md for the 1.2.1 build and isolated test results.
+> **These results do not cover 1.3.0.** They belong to the 1.2.0 final JAR listed below, which was an obfuscated build. They were not re-run for 1.2.1, and no real-server test at all was run for 1.3.0, because starting a Minecraft server requires accepting the Minecraft EULA.
+>
+> 1.3.0 differs from the tested build in ways these results cannot stand in for: the JARs are no longer obfuscated; the plugin uses only public server API, with Brigadier commands and Adventure components on Paper and Purpur and plugin.yml commands on Spigot; worlds are saved by running `minecraft:save-all flush`; a file that changes while it is copied no longer aborts the backup; and the way a server stop is recognised changed (an API check on Paper and Purpur, a ten-minute rule on Spigot). The harness in tools/runtime-tests that produced these results was not updated for 1.3.0 either. See TEST-RESULTS.md for the build and isolated test results of the current release.
 
 Prerelease test distribution. Tested on 2026-10-13 UTC with Temurin JDK 25.0.4.1+1.
 
@@ -35,4 +37,4 @@ Disable automatic restart. Reserve restoration, stop manually, wait for helper S
 - Test worlds were loopback-only and disposable. The sole added exclusion was `plugins/spark/tmp/**`; existing runtime cache/libraries were deliberately retained. No real users, worlds or webhooks were involved.
 - Actual-player GUI interactions, runtime player permission revocation, Windows, real webhooks, production scale and power loss were not tested. Source/unit tests are separate evidence.
 
-The accompanying JSON contains exact server hashes and check lists without raw logs, machine paths, PIDs or job identifiers.
+The accompanying JSON (docs/test-evidence/runtime-summary.json) contains exact server hashes and check lists without raw logs, machine paths, PIDs or job identifiers. It records this same 1.2.0 run and, like this document, does not cover 1.3.0.

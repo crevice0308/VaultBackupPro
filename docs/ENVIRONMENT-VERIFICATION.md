@@ -2,7 +2,9 @@
 
 Checked against publisher documentation, live Maven metadata, and publisher download APIs on **2026-10-13 UTC**. Availability verification is not a runtime compatibility test. Exact builds below were current when checked; dynamic documentation and Javadocs may lag the download APIs.
 
-For this 1.2.0 revision, the actual Paper 26.3 runtime target is build **179**, SHA-256 `5c208cf990315cff647b8e8b3d487b98c8be2f31655985ed004c7bb25b3857ce`. The original dependency/provenance research below includes build 178 and does not imply a 1.2.0 runtime test of it. Spigot runtime preparation was blocked; see SPIGOT-COMPATIBILITY.md.
+**Status for 1.3.0.** This document remains the research record of 2026-10-13 and was not repeated for 1.3.0. No server was started for 1.3.0, because running one requires accepting the Minecraft EULA. The server initializations described below were made in October 2026, and the plugin runtime results in [RUNTIME-TEST-RESULTS.md](RUNTIME-TEST-RESULTS.md) and docs/test-evidence belong to an earlier release that was an obfuscated build; none of them covers 1.3.0. The API builds that 1.3.0 is compiled and link-checked against differ from the coordinates researched here: they are pinned in build.gradle.kts and listed in [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md). 1.3.0 supports Minecraft 26.2 and newer; PaperMC ended support for 26.2 on 2026-11-03, so 26.3 is recommended.
+
+For the 1.2.0 revision, the actual Paper 26.3 runtime target was build **179**, SHA-256 `5c208cf990315cff647b8e8b3d487b98c8be2f31655985ed004c7bb25b3857ce`. The original dependency/provenance research below includes build 178 and does not imply a 1.2.0 runtime test of it. Spigot runtime preparation was blocked; see SPIGOT-COMPATIBILITY.md.
 
 ## Minecraft, Java, and target builds
 
@@ -21,6 +23,8 @@ Paper repository: `https://repo.papermc.io/repository/maven-public/`
 
 Both coordinates appear in [live Paper Maven metadata](https://repo.papermc.io/repository/maven-public/io/papermc/paper/paper-api/maven-metadata.xml); their individual POM URLs returned HTTP 200. Use Gradle `compileOnly` or Maven `provided`. Do not use the old `-R0.1-SNAPSHOT` suffix for Paper 26.x. Paper explains the new version scheme in its [26.1 announcement](https://papermc.io/news/26-1/).
 
+These two coordinates are the ones researched on 2026-10-13. The public releases up to 1.2.1 compiled against the Spigot API only. 1.3.0 compiles its Paper implementation classes against the Paper API again and pins `io.papermc.paper:paper-api:26.2.build.135-stable` and `io.papermc.paper:paper-api:26.3.build.253-stable`.
+
 Purpur repository: `https://repo.purpurmc.org/snapshots/`
 
 - `org.purpurmc.purpur:purpur-api:26.2.build.2633-stable`
@@ -28,7 +32,7 @@ Purpur repository: `https://repo.purpurmc.org/snapshots/`
 
 Both appear in [live Purpur Maven metadata](https://repo.purpurmc.org/snapshots/org/purpurmc/purpur/purpur-api/maven-metadata.xml). A Paper-based plugin does not need a Purpur-specific dependency unless it uses Purpur-only API.
 
-Set `api-version: '26.2'` in plugin.yml for the minimum supported API. That field rejects older servers but does not enforce an upper bound, so a separate explicit runtime version check is needed for exclusive 26.2/26.3 support. [Paper plugin.yml documentation](https://docs.papermc.io/paper/dev/plugin-yml/).
+Set `api-version: '26.2'` in plugin.yml for the minimum supported API. That field rejects older servers but does not enforce an upper bound, so a separate explicit runtime version check is needed for exclusive 26.2/26.3 support. [Paper plugin.yml documentation](https://docs.papermc.io/paper/dev/plugin-yml/). Releases up to 1.2.1 had such a check and refused every other version. 1.3.0 keeps only the minimum: it uses public API only, so versions newer than 26.3 run with a warning that they are untested.
 
 ## Official server downloads and publisher hashes
 
@@ -68,7 +72,7 @@ Purpur download URLs returned HTTP 200 and the expected attachment filenames. MD
 
 ## Original Paper baseline: storage and save semantics (historical)
 
-The save API discussion in this section records the original Paper-only implementation. This release uses the shared ServerLifecycle adapter described below and in SPIGOT-COMPATIBILITY.md; it does not call Paper-only World.save(boolean).
+The save API discussion in this section records the original Paper-only implementation. The public releases 1.0.0 to 1.2.1 used a reflective ServerLifecycle adapter instead. 1.3.0 uses neither: it runs the vanilla `minecraft:save-all flush` command through the public command dispatch, because `World#save` does not flush on Spigot and omits the global data on Paper. See SPIGOT-COMPATIBILITY.md.
 
 The [Paper 26.1 storage migration](https://papermc.io/news/26-1/) applies to these targets. Dimension files live below `world/dimensions/<namespace>/<dimension>/`; shared player files are below `world/players/`, and level.dat, datapacks, and shared data belong to the world root. Backing up only the dimension path omits shared state. Do not assume the old `world_nether`, `world_the_end`, or `playerdata` layout.
 
@@ -80,11 +84,11 @@ This flush is not a filesystem snapshot and does not guarantee an atomic cross-f
 
 ## 公開版の API・ライセンス
 
-本改訂のコンパイル対象は Spigot API 26.2 の固定 timestamp artifact です。上記 Paper/Purpur 座標は最初の調査記録であり、現在の build.gradle の依存関係ではありません。[Spigot 対応調査](SPIGOT-COMPATIBILITY.md) に公式 BuildTools と API の来歴を記載しています。
+1.3.0 のコンパイル対象は、Spigot API と Paper API の 2 つです。共通部分と Spigot 用の実装は Spigot API、Paper 用の実装は Paper API に対してコンパイルします。固定している座標は build.gradle.kts と THIRD-PARTY-NOTICES.md に記載しています。上記の Paper の座標は 2026-10-13 の調査記録であり、1.3.0 が固定しているビルドとは異なります。Purpur API は使用しません。[Spigot 対応調査](SPIGOT-COMPATIBILITY.md) に公式 BuildTools と API の来歴を記載しています。公開版 1.0.0 から 1.2.1 までは、Spigot API 26.2 の固定 timestamp artifact だけをコンパイル対象としていました。
 
-Paper 専用の World.save(true) から、実対象で検証する CraftServer → MinecraftServer.saveEverything(true,true,true) に移行しました。未知の反射シグネチャや失敗は安全側に拒否します。停止判定は別に hasStopped を使用しますが、保存完了の証明としては使いません。
+保存処理は次のように変わりました。最初の Paper 専用の実装は World.save(true) を使い、公開版 1.0.0 から 1.2.1 までは、サーバー内部の CraftServer → MinecraftServer.saveEverything(true,true,true) をリフレクションで呼び出し、停止判定には内部の hasStopped を使っていました。1.3.0 では内部へのリフレクションをやめ、公開 API のコマンド実行で `minecraft:save-all flush` を実行します。停止の判定は、Paper・Purpur では Bukkit.isStopping()、Spigot ではプラグインの無効化から 10 分以内の JVM 終了で行います。どちらも保存完了の証明としては使いません。
 
-本公開版は GPL-3.0-only で無料配布します。1.1.0 は ProGuard 7.10.0 で難読化した JAR が標準です。Spigot/Paper/Minecraft のクラスやサーバー JAR をプラグインへ同梱しません。[ライセンス記録](LICENSE-REVIEW.md) と THIRD-PARTY-NOTICES.md を参照してください。公開ファイル名とソースは [配布情報](../PUBLICATION-NOTES.md) を参照してください。
+本公開版は GPL-3.0-only で無料配布します。1.1.0 から 1.2.1 までは ProGuard 7.10.0 で難読化した JAR を配布していました。1.3.0 の JAR は難読化していません。Spigot/Paper/Minecraft のクラスやサーバー JAR をプラグインへ同梱しません。[ライセンス記録](LICENSE-REVIEW.md) と THIRD-PARTY-NOTICES.md を参照してください。公開ファイル名とソースは [配布情報](../PUBLICATION-NOTES.md) を参照してください。
 
 ## Initialization results
 
@@ -94,6 +98,6 @@ Retained logs include Minecraft authentication/discovery DNS errors in this isol
 
 ## プラグインの最終検証
 
-旧版の 4 サーバー難読化 JAR 検証は本改訂の証拠に置き換えません。本公開版の正確な最終 JAR、6 サーバー結果、追加取消・異常終了検証は [実行結果](RUNTIME-TEST-RESULTS.md) と TEST-RESULTS.md を参照してください。
+1.3.0 では、プラグインを実サーバーで検証していません。[実行結果](RUNTIME-TEST-RESULTS.md) と docs/test-evidence にある実サーバーの結果は過去の版（難読化ビルド）のもので、1.3.0 を対象としていません。旧版の結果を 1.3.0 の証拠に置き換えることはしません。1.3.0 のビルドと隔離試験の結果、最終 JAR の SHA-256 は TEST-RESULTS.md と release/SHA256SUMS.txt を参照してください。
 
-Purpur 26.3 は上流で experimental のままです。GUI の実クライアント操作、Windows 改訂版、実 webhook、実運用サイズ、突然の電源断は未検証です。
+Purpur 26.3 は、2026-10-13 の確認時点で上流の experimental 扱いでした。その後の状況は確認していません。Spigot の実機、GUI の実クライアント操作、Windows、実 webhook、実運用サイズ、突然の電源断は未検証です。

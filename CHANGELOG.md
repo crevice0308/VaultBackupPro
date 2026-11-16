@@ -10,7 +10,7 @@
 - Paper・Purpur: コマンドは Brigadier（ライフサイクル API）で登録、メッセージと管理画面は Adventure コンポーネント、アイテムは `ItemStack.of`、停止の判定は `Bukkit.isStopping()`、サーバーの判別は `ServerBuildInfo`。Paper 26.3 で旧式（Obsolete）になった `CommandExecutor`・`TabCompleter` は Paper では使用しない
 - Spigot: plugin.yml のコマンドと `CommandExecutor`、`ChatColor` を使用（Spigot の推奨どおり）
 - ワールドの保存を `minecraft:save-all flush` の実行に変更（level.dat やスコアボードも保存対象）
-- Minecraft 26.2 以降で動作（26.3 で確認）。確認済みより新しいバージョンでは警告を表示して動作。Folia など領域分割型サーバーは従来どおり非対応
+- Minecraft 26.2 以降で動作（26.2・26.3 の API に対してビルドと検査を実施）。それより新しいバージョンでは警告を表示して動作。Folia など領域分割型サーバーは従来どおり非対応
 - 難読化を廃止。配布する JAR はソースをそのままビルドしたもの（ProGuard を削除）
 - ビルドを Gradle Kotlin DSL に移行。非推奨 API の使用をビルド時に検査し、Spigot 26.2・26.3、Paper 26.2・26.3 の 4 つの API に対して JAR のリンク検査を実施
 

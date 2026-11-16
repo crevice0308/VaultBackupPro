@@ -1,4 +1,6 @@
-# 運用上の境界 — VaultBackup Pro 1.2.1
+# 運用上の境界 — VaultBackup Pro 1.3.0
+
+1.3.0 では実サーバー試験を実施していません。この文書の内容は、ソースの確認と、サーバーを起動しない隔離試験にもとづきます。実サーバーで観測した事項は、どの版での観測かを明記しています。[RUNTIME-TEST-RESULTS.md](RUNTIME-TEST-RESULTS.md) と docs/test-evidence にある実サーバーの結果は過去の版（難読化ビルド）のもので、1.3.0 を対象としていません。
 
 この版は操作手順を簡略化しています。削除は追加確認なしで行い、保持設定によって最後のバックアップもなくなります。独立した復旧用コピーを保管してください。
 
@@ -8,13 +10,44 @@
 
 プラグインはホストや別プロセスの起動を完全に管理できません。復元中の自動再起動を止め、ヘルパー完了前にサーバーを起動しない運用が必要です。稼働中のバックアップは外部DBや任意の同時書込みを原子的に止めるものではありません。
 
-最終 JAR の実行済み試験、難読化後の検証、未確認環境は [TEST-RESULTS.md](../TEST-RESULTS.md) に記載します。コードレビューや試験合格は無欠陥・無損失保証や第三者認証ではありません。Windows と実クライアントの操作は、実行していない場合は明記します。
+最終 JAR に対して実行した検査、未確認環境は [TEST-RESULTS.md](../TEST-RESULTS.md) に記載します。コードレビューや試験合格は無欠陥・無損失保証や第三者認証ではありません。Windows と実クライアントの操作は、実行していない場合は明記します。
 
-ビルド用ツールとサーバーAPIはプラグインに同梱せず、固定バージョンとSHA-256で検証します。GPLv3対応ソース、テスト、難読化設定をソースZIPに含めます。
+ビルド用ツールとサーバーAPIはプラグインに同梱せず、固定バージョンとSHA-256で検証します。配布 JAR は難読化していません。GPLv3対応ソース、テスト、ビルド設定をソースZIPに含めます。
 
 ## Additional measured startup boundary
 
-An isolated Paper 26.3 build 179 probe held the root guard in an independent process. The plugin requested shutdown, but Paper subsequently prepared/saved the world and changed level.dat before exiting. Consequently, concurrent server startup during restoration is unsupported; the plugin cannot guarantee prevention of those writes or resulting corruption. Auto-restart must be disabled and manual startup must wait for helper completion and exit. The previous independent source review did not certify this subsequently measured boundary; an additional independent review was unavailable. This distribution is an prerelease test build, not a production-safety certification. The cause of the reported user shutdown incident remains unconfirmed.
+Measured with the 1.2.0 JAR; not repeated for 1.3.0. An isolated Paper 26.3 build 179 probe held the root guard in an independent process. The plugin requested shutdown, but Paper subsequently prepared/saved the world and changed level.dat before exiting. Consequently, concurrent server startup during restoration is unsupported; the plugin cannot guarantee prevention of those writes or resulting corruption. Auto-restart must be disabled and manual startup must wait for helper completion and exit. The previous independent source review did not certify this subsequently measured boundary; an additional independent review was unavailable. This distribution is a prerelease test build, not a production-safety certification. The cause of the reported user shutdown incident remains unconfirmed.
+
+1.3.0 still requests a server stop in this situation (another process holds the root guard), so the boundary applies unchanged. What changed in 1.3.0 is that other startup problems no longer request a stop; see below.
+
+## 1.3.0 で修正・変更した点
+
+- サーバー内部（NMS・CraftBukkit）へのリフレクションをやめ、Paper と Spigot の公開 API だけを使うようにしました。名前でクラスやメソッドを調べるのは、Paper API の有無の確認と自身の Paper 用実装の読み込み（実装の切り替え）、Folia のクラスの有無の確認（非対応サーバーの拒否）だけで、サーバー内部の処理は呼び出しません。
+- 難読化をやめました。配布 JAR はソースをそのままビルドしたもので、CI がハッシュを照合します（[OBFUSCATION.md](OBFUSCATION.md)）。
+- 細工されたアーカイブ（極端に深いパス、巨大な中央ディレクトリ）でメモリを使い切られる問題に対処しました。アーカイブを開く前に ZIP 末尾の記録を読み、エントリ数と中央ディレクトリの大きさを上限と照合します。パスの重複や大文字・小文字の衝突の検査も、上限のある構造で行います。
+- UTF-8 以外のロケールで起動したサーバーで、ASCII 以外の名前のファイルが壊れた名前で保存される問題に対処しました。該当するファイルがあればバックアップを拒否し、起動時に警告します。ヘルパーは、サーバーが UTF-8 以外のロケールで動いている場合、UTF-8 ロケールを指定して起動します。
+- `/backup` を実行できるのをプレイヤー、コンソール、RCON に限定しました。コマンドブロックなどは権限の判定では OP と同じ扱いになるため、種類で拒否します。
+- 権限を 1 つも持たない送信者にはコマンドを表示しません。バックアップ ID の補完候補は、その操作の権限を持つ送信者にだけ表示します。
+- 操作の記録（実行者と内容）をサーバーログに出力します。管理画面のクリックはサーバー自身のコマンドログに残らないためです。復元の予約は、オンラインの他の管理者（`vaultbackup.notify`）にも通知します。
+- 設定変更コマンドが、config.yml の未反映の手編集を一緒に適用していました。未反映の編集がある間は拒否します。書き換えの際は、ファイルの権限とシンボリックリンクを保持します（Webhook URL を含み得るため）。
+- ロック用のファイルを所有者のみ（0600）で作成します。別のローカルユーザーがファイルを開いてロックを保持できないようにするためです。
+- プラグインの JAR に復元ヘルパーが同梱されていない場合、照合するハッシュがないため、復元を受け付けません。
+- ロールバックと復旧では、ジョブが記録した元のサーバールートであると確認できたフォルダーだけを戻します。同じ場所に別のローカルユーザーが作ったフォルダーを取り違えません。ファイルの識別子がないファイルシステム（Windows）ではこの確認ができず、従来どおり記録とパスで判断します。
+- `/reload` やプラグインの再読み込みで、サーバー全体を停止していました。再読み込み後は、同じサーバープロセスの保護ロックを引き継ぎ、復元予約を取り消して動作を続けます。
+- 起動時の安全確認でサーバーの停止を要求するのは、他のプロセスが保護ロックを保持している場合と、状態保存先に復元記録が存在する（または記録の有無を確かめられない）状態で確認に失敗した場合だけにしました。それ以外は、プラグインだけを無効にします。
+- ホストの再起動後にプロセス ID が再利用されると、プラグインが無効のままになる問題に対処しました。記録した開始時刻と一致しないプロセスは、別のプロセスとして扱います。サーバールートが使用中かどうかは、従来どおり保護ロックで判断します。
+- バックアップの前に必要な空き容量を見積もり、書き込み中も確認して、保存先を使い切らないようにしました。
+- 復元できない構成（サーバールートがマウントポイント、親フォルダーに書き込めない、空き容量不足）を、サーバー停止後ではなく予約の時点で拒否します。
+- 入れ替えの前に失敗した復元が、展開途中のデータを残していました。ヘルパーが削除します。
+
+これらに対応する隔離試験（サーバーを起動しないもの）を、ビルドの `check` に含めています。結果は TEST-RESULTS.md を参照してください。
+
+### 1.3.0 で残る境界
+
+- Spigot には、サーバーが停止中かどうかを確認する API がありません。プラグインの無効化から 10 分以内に JVM が終了した場合を正常停止として扱うため、プラグインだけを無効化して 10 分以内にサーバーが異常終了した場合にも、予約済みの復元が適用され得ます。Paper・Purpur は API で確認するため、この扱いはありません。Spigot で復元を予約している間は、プラグインの再読み込みや無効化を行わないでください。
+- ワールドの保存は、公開 API のコマンド実行（`minecraft:save-all flush`）で行い、ワールドごとの保存イベント（Paper・Purpur ではコマンドの成功応答も）で確認します。この確認方法は模擬したサーバーに対する試験で扱っているだけで、実サーバーでは確認していません。
+- 稼働中のバックアップでは、コピー中に変化し続けたファイルを最後に読み取った内容で保存します。件数は表示しますが、そのファイルの内部の整合性は確認できません。
+- 同じ OS アカウントによる悪意のある改ざんは、従来どおり対象外です。
 
 ## 1.2.1 で修正した問題
 
@@ -27,4 +60,4 @@ An isolated Paper 26.3 build 179 probe held the root guard in an independent pro
 - 強制停止で残った作成途中の一時ファイルが削除されず、容量を消費し続けていました。
 - 復元予約に、直前に検証した記録ではなく一覧の記録を使っていました。ヘルパー起動失敗の理由がサーバーログに出ていませんでした。
 
-上記の修正はソースレビューと隔離試験（TEST-RESULTS.md）で確認しました。1.2.1 では実サーバー試験を再実施していません。
+上記の修正は、1.2.1 の時点でソースレビューと隔離試験により確認したものです。1.2.1 でも実サーバー試験は再実施していません。1.3.0 では、一覧の更新（`/backup list`）も未変更のアーカイブを読み直さなくなり、全体の再検証は起動時、`/backup verify`、GUI の再検証ボタンで行います。
