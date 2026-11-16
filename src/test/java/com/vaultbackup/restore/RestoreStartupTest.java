@@ -81,7 +81,7 @@ public final class RestoreStartupTest {
         fileNameEncoding(base.resolve("file-names"));
         interruptedExtraction(base.resolve("interrupted"));identityAcrossReboots(base.resolve("device-numbers"));
         markerTimeAndForm(base.resolve("marker-form"));recoveryWithoutBackupStorage(base.resolve("no-storage"));
-        serverRecognisedAsParent(base.resolve("clock-step"));
+        serverRecognisedAsParent(base.resolve("clock-step"));uncollectedExit();
         System.out.println("RestoreStartupTest: "+checks+" checks passed; disposable fixtures at "+base);
     }
     private static Fixture fixture(Path base,String status)throws Exception {
@@ -663,6 +663,33 @@ public final class RestoreStartupTest {
             check(automatic.waitFor(10,TimeUnit.SECONDS) && automatic.exitValue()==3 && RestoreJobState.acknowledged(f.dir,f.job),"it still honours a cancellation");
         } finally {kill(automatic);}
         unchanged(f);
+    }
+    /**
+     * A process that has exited stays in the process table until its parent collects the exit status,
+     * and the JDK reports it as alive for all that time. A server started by a control panel that
+     * polls its child is in that state for a moment after every stop; found on a real server, where
+     * the helper then refused the restore because "the server JVM is still alive".
+     */
+    private static void uncollectedExit()throws Exception {
+        if(!Files.isReadable(Path.of("/proc/self/stat")))return; // The state is recognised on Linux only.
+        Process holder;
+        // The shell starts a child that exits at once, prints its process ID and turns into a sleep, which never collects it.
+        try{holder=new ProcessBuilder("sh","-c","sh -c 'exit 0' & echo $!; exec sleep 60").redirectError(ProcessBuilder.Redirect.INHERIT).start();}
+        catch(IOException noShell){return;}
+        try {
+            long pid=Long.parseLong(new BufferedReader(new InputStreamReader(holder.getInputStream())).readLine().trim());
+            long deadline=System.nanoTime()+Duration.ofSeconds(10).toNanos();
+            while(!RestoreFiles.exitedUncollected(pid)) {
+                if(System.nanoTime()>deadline)throw new AssertionError("the exited child never showed as uncollected");
+                Thread.sleep(20);
+            }
+            ProcessHandle exited=ProcessHandle.of(pid).orElseThrow(()->new AssertionError("an uncollected process is still in the process table"));
+            Instant started=exited.info().startInstant().orElseThrow();
+            // What makes this state easy to misread: the JDK itself says the process is alive (exited.isAlive()).
+            check(RestoreFiles.liveness(pid,started)==RestoreFiles.Liveness.GONE,"a process that has exited but was not collected by its parent is gone, whatever the process table says");
+            check(RestoreFiles.liveness(holder.pid(),holder.info().startInstant().orElseThrow())==RestoreFiles.Liveness.ALIVE && !RestoreFiles.exitedUncollected(holder.pid()),"a running process is not mistaken for an exited one");
+            check(!RestoreFiles.exitedUncollected(ProcessHandle.current().pid()),"and neither is this JVM, whose first thread only waits for the others");
+        } finally {kill(holder);}
     }
     private static Process sleeper(Fixture f)throws Exception {
         Process p=spawn("--sleep",f.dir.toString());await(f.dir.resolve("helper-held"));RestoreJobState.recordProcess(f.dir,f.job,p.toHandle());return p;

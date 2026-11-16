@@ -38,6 +38,7 @@ public final class RestoreSafetyTest {
             deadHelperTest(temp.resolve("dead-helper"));
             killedParentTest(temp.resolve("killed-parent"));
             terminalSignalsTest(temp.resolve("terminal-signals"));
+            uncollectedServerTest(temp.resolve("uncollected-server"));
             disabledPluginTest(temp.resolve("plugin-disabled"));
             reloadedPluginTest(temp.resolve("plugin-reloaded"));
             integration(temp.resolve("success"),false);
@@ -432,6 +433,35 @@ public final class RestoreSafetyTest {
             await(()->statusEquals(dir,"SUCCESS"),Duration.ofSeconds(20),"restore after terminal signals",null,f);
             check(Files.readString(root.resolve("world/level.dat")).equals("BACKUP") && Files.readString(Path.of(job.getProperty("rollback")).resolve("world/level.dat")).equals("ORIGINAL"),"and the restore is applied");
         } finally {if(parent.isAlive()){parent.destroyForcibly();parent.waitFor();}}
+    }
+    /**
+     * The server here is started by a program that never collects its exit status, so after stopping it
+     * stays in the process table and the JDK keeps reporting it as alive. Control panels that poll the
+     * server they started leave it in that state for a moment after every stop. The helper must go by
+     * the fact that its parent has exited, not refuse because the process is still listed.
+     */
+    private static void uncollectedServerTest(Path f)throws Exception {
+        if(!Files.isReadable(Path.of("/proc/self/stat")))return; // Needs a shell and a process table to look at.
+        Path root=fixture(f);
+        List<String> command=new ArrayList<>(List.of("sh","-c","\"$@\" & exec sleep 120","sh",
+                Path.of(System.getProperty("java.home"),"bin","java").toString(),"-cp",System.getProperty("java.class.path"),
+                RestoreSafetyTest.class.getName(),"--parent",f.toString(),helperJar.toString()));
+        Process holder;
+        try{holder=new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.INHERIT).start();}
+        catch(IOException noShell){return;}
+        long server=-1;
+        try {
+            Path file=ready(f,holder),dir=file.getParent();Properties job=RestoreFiles.load(file);
+            server=Long.parseLong(job.getProperty("parentPid"));
+            check(server!=holder.pid() && ProcessHandle.of(server).flatMap(ProcessHandle::parent).map(p->p.pid()==holder.pid()).orElse(false),"fixture: the server is a child of a program that does not collect it");
+            Files.createFile(f.resolve("stop.request"));
+            await(()->statusEquals(dir,"SUCCESS"),Duration.ofSeconds(30),"restore of a server whose exit was not collected",null,f);
+            check(RestoreFiles.exitedUncollected(server) && ProcessHandle.of(server).map(ProcessHandle::isAlive).orElse(false),"fixture: the exited server is still listed, and reported as alive by the JDK");
+            check(Files.readString(root.resolve("world/level.dat")).equals("BACKUP") && Files.readString(Path.of(job.getProperty("rollback")).resolve("world/level.dat")).equals("ORIGINAL"),"a server whose exit status nobody collected is restored all the same");
+        } finally {
+            if(holder.isAlive()){holder.destroyForcibly();holder.waitFor();}
+            if(server>0)ProcessHandle.of(server).filter(p->!RestoreFiles.exitedUncollected(p.pid())).ifPresent(ProcessHandle::destroyForcibly);
+        }
     }
     /**
      * Spigot has no API that says whether the server is stopping. Its marker therefore only says

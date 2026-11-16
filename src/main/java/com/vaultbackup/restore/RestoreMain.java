@@ -74,6 +74,7 @@ public final class RestoreMain {
                     // Taken as soon as the exit is seen: a PLUGIN_DISABLED stop marker is only valid for a prompt exit.
                     Instant exitObserved=Instant.now();
                     Duration sinceMarker=marker.sinceFirstSeen();
+                    if(!manual && !awaitCollected(job))return 3;
                     try(RestoreJobState.Gate gate=RestoreJobState.requireLock(job.dir)) {
                         if(cancelled(job))return 3;
                         RestoreJobState.requireActive(job.state,job.p);
@@ -218,7 +219,27 @@ public final class RestoreMain {
             // There is deliberately no clock deadline after the bounded startup handshake.
             try{Thread.sleep(200);}catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException("Interrupted while waiting for JVM exit",e);}
         }
-        RestoreFiles.requireDeadParent(job.p);return true;
+        return true;
+    }
+    /**
+     * The server has exited: it is no longer this helper's parent. Its process can still be listed for
+     * a while, as an exit status that nobody has collected yet. Where that state is recognised
+     * ({@link RestoreFiles#exitedUncollected}) the process already counts as gone; elsewhere this waits
+     * for the entry to disappear instead of refusing the restore. A cancellation is honoured meanwhile.
+     *
+     * @return false when the reservation was cancelled
+     */
+    private static boolean awaitCollected(Job job)throws IOException {
+        while(true) {
+            RestoreFiles.Liveness recorded=RestoreFiles.parentLiveness(job.p);
+            if(recorded==RestoreFiles.Liveness.GONE)return true;
+            if(recorded==RestoreFiles.Liveness.UNCERTAIN)throw new IOException("The recorded server JVM's process cannot be identified. No restore is permitted.");
+            try(RestoreJobState.Gate gate=RestoreJobState.requireLock(job.dir)) {
+                if(cancelled(job))return false;
+                RestoreJobState.requireActive(job.state,job.p);
+            }
+            try{Thread.sleep(200);}catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException("Interrupted while waiting for the exited server process to be collected",e);}
+        }
     }
     private record Guard(FileChannel channel,FileLock lock) implements AutoCloseable {
         @Override public void close()throws IOException{lock.release();channel.close();}

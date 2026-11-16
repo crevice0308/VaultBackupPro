@@ -189,13 +189,33 @@ final class RestoreFiles {
             Optional<Instant> actual = process.get().info().startInstant();
             if (actual.isPresent()) {
                 if (Duration.between(recordedStart, actual.get()).abs().compareTo(START_TOLERANCE) > 0) return Liveness.GONE;
-                return process.get().isAlive() ? Liveness.ALIVE : Liveness.GONE;
+                return process.get().isAlive() && !exitedUncollected(pid) ? Liveness.ALIVE : Liveness.GONE;
             }
             // No start instant: the process may have exited between the two calls. Look again.
             if (!process.get().isAlive()) return Liveness.GONE;
             try { Thread.sleep(20); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return Liveness.UNCERTAIN; }
         }
         return Liveness.UNCERTAIN;
+    }
+    /**
+     * A process that has exited, but whose exit status its parent has not collected yet (a "zombie",
+     * shown as "defunct"). Nothing but its entry in the process table is left: no thread, no memory,
+     * no open file and no file lock. The JDK still reports it as alive, with its start time, for as
+     * long as the parent takes. A shell collects its child at once; a control panel that polls the
+     * server it started takes a moment, and some programs never do it.
+     *
+     * Recognised on Linux only. Elsewhere this is false and callers wait for the entry to disappear.
+     */
+    static boolean exitedUncollected(long pid) {
+        try {
+            Path entry = Path.of("/proc", Long.toString(pid));
+            // "pid (name) state ...": the name may contain anything, parentheses included.
+            String stat = Files.readString(entry.resolve("stat"), java.nio.charset.StandardCharsets.ISO_8859_1);
+            int state = stat.lastIndexOf(')') + 2;
+            if (state < 2 || state >= stat.length() || (stat.charAt(state) != 'Z' && stat.charAt(state) != 'X')) return false;
+            // The first thread of a process can end before the others; such a process is still running.
+            try (java.util.stream.Stream<Path> threads = Files.list(entry.resolve("task"))) { return threads.limit(2).count() <= 1; }
+        } catch (IOException | RuntimeException goneOrNotLinux) { return false; }
     }
     static Liveness parentLiveness(Properties job) throws IOException {
         try { return liveness(Long.parseLong(required(job,"parentPid")), Instant.parse(required(job,"parentStartedAt"))); }
