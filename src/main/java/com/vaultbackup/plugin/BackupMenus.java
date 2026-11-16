@@ -9,13 +9,14 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 
-import java.nio.file.Files;
 import java.util.*;
 import java.util.function.Consumer;
 
@@ -27,6 +28,8 @@ import java.util.function.Consumer;
 final class BackupMenus implements Listener {
     private final VaultBackupPlugin plugin;
     private final Map<UUID, Menu> open = new HashMap<>();
+    /** Players who wait, with no menu open, for a background action that a menu button started. */
+    private final Set<UUID> returning = new HashSet<>();
     BackupMenus(VaultBackupPlugin plugin) { this.plugin = plugin; }
     private String t(String key, Object... args) { return plugin.text(key,args); }
     private String yes(boolean value) { return t(value ? "common.yes" : "common.no"); }
@@ -44,7 +47,16 @@ final class BackupMenus implements Listener {
     }
     private void show(Player p, Menu menu) {
         if (!access(p) || !p.isOnline()) return;
-        p.openInventory(menu.inventory); open.put(p.getUniqueId(),menu);
+        // Another plugin may cancel the open event; a menu that is not on screen must not accept clicks.
+        if (p.openInventory(menu.inventory) != null) open.put(p.getUniqueId(),menu);
+    }
+    /** A menu button closed the menu and started work in the background; the list may be shown again when it is done. */
+    void expectReturn(Player p) { returning.add(p.getUniqueId()); }
+    void forgetReturn(Player p) { returning.remove(p.getUniqueId()); }
+    /** Shows the list again after such work, unless the player has opened something else in the meantime. */
+    void returnToList(Player p) { if (returning.remove(p.getUniqueId()) && p.isOnline()) openList(p,0); }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true) public void opened(InventoryOpenEvent event) {
+        returning.remove(event.getPlayer().getUniqueId());
     }
     void openMain(Player p) {
         if (!access(p)) return;
@@ -73,7 +85,14 @@ final class BackupMenus implements Listener {
             lore.add(t("menu.details"));
             m.put(i-start,Material.ENDER_CHEST,record.id(),lore,"list",who -> openInfo(who,record.id(),current));
         }
-        if (records.isEmpty()) m.display(22,Material.BARRIER,t("menu.empty"),List.of(t("menu.empty.hint")));
+        if (records.isEmpty()) m.display(22,Material.BARRIER,plugin.catalogueLoaded() ? t("menu.empty") : t("list.loading"),
+                plugin.catalogueLoaded() ? List.of(t("menu.empty.hint")) : List.of());
+        Map<String,String> rejected = plugin.rejectedArchives();
+        if (!rejected.isEmpty()) {
+            List<String> lore = new ArrayList<>(List.of(t("menu.rejected.hint")));
+            rejected.keySet().stream().sorted().limit(8).forEach(lore::add);
+            m.display(47,Material.COBWEB,t("menu.rejected",rejected.size()),lore);
+        }
         if (current>0) m.put(45,Material.ARROW,t("menu.previous"),List.of(),"list",who -> openList(who,current-1));
         m.put(48,Material.COMPASS,t("common.dashboard"),List.of(),"gui",this::openMain);
         m.put(49,Material.SPYGLASS,t("menu.refresh"),List.of(t("menu.refresh.hint")),"list",who -> plugin.refresh(who,true,() -> openList(who,current)));
@@ -89,7 +108,7 @@ final class BackupMenus implements Listener {
                 t("common.entries",record.entryCount()),"SHA-256: "+record.sha256().substring(0,16)+"…",
                 record.unstableEntries() > 0 ? t("list.unstable",record.unstableEntries()) : t("list.stable")));
         m.put(11,Material.LIME_CONCRETE,t("menu.restore"),List.of(t("menu.selected",id),t("menu.restore.direct"),t("menu.restore.manual"),t("menu.noautorestart"),t("menu.restore.rollback"),t("menu.excluded"),t("menu.restore.cancelhint")),"restore",who -> { who.closeInventory(); plugin.requestRestore(who,id); });
-        m.put(15,Material.RED_CONCRETE,t("menu.delete"),List.of(t("menu.selected",id),t("menu.delete.direct"),t("menu.delete.files"),t("menu.delete.permanent"),t("menu.delete.pinned")),"delete",who -> { who.closeInventory(); plugin.delete(who,id); });
+        m.put(15,Material.RED_CONCRETE,t("menu.delete"),List.of(t("menu.selected",id),t("menu.delete.direct"),t("menu.delete.files"),t("menu.delete.permanent"),t("menu.delete.pinned")),"delete",who -> { who.closeInventory(); plugin.delete(who,id,true); });
         m.put(22,Material.ARROW,t("menu.back"),List.of(),"list",who -> openList(who,page));
         show(p,m);
     }
@@ -123,7 +142,7 @@ final class BackupMenus implements Listener {
         long used=plugin.backups().stream().mapToLong(BackupRecord::compressedBytes).sum();
         m.display(10,Material.CHEST,t("menu.storage.backups"),List.of(s.backupDirectory().toString(),t("menu.storage.used",VaultBackupPlugin.humanBytes(used)),t("common.free",VaultBackupPlugin.humanBytes(plugin.freeSpace())),t("menu.catalogue.count",plugin.backups().size())));
         m.display(12,Material.COMPARATOR,t("menu.status"),List.of(plugin.operation(),plugin.progress(),t("common.next",plugin.nextAutomatic()==null?t("common.off"):plugin.nextAutomatic())));
-        m.display(14,Material.IRON_DOOR,t("menu.storage.helper"),List.of(s.helperJar().toString(),t("common.available",yes(Files.isRegularFile(s.helperJar()))),t("common.state",s.stateDirectory()),t("menu.storage.offline")));
+        m.display(14,Material.IRON_DOOR,t("menu.storage.helper"),List.of(s.helperJar().toString(),t("common.available",yes(plugin.helperAvailable())),t("common.state",s.stateDirectory()),t("menu.storage.offline")));
         m.put(16,Material.WRITABLE_BOOK,t("menu.storage.settings"),List.of(t("menu.storage.edit"),t("menu.storage.restart"),t("menu.storage.external")),"configure",who -> plugin.tell(who,t("menu.storage.message"),true));
         if (plugin.restoreReserved()) {
             m.display(20,Material.PAPER,t("operation.reserved"),List.of(plugin.restoreState(),
@@ -163,10 +182,10 @@ final class BackupMenus implements Listener {
         Menu m = menu(event.getInventory());
         if (m != null) open.remove(event.getPlayer().getUniqueId(),m);
     }
-    @EventHandler public void quit(PlayerQuitEvent event) { open.remove(event.getPlayer().getUniqueId()); }
+    @EventHandler public void quit(PlayerQuitEvent event) { open.remove(event.getPlayer().getUniqueId()); returning.remove(event.getPlayer().getUniqueId()); }
     void closeAll() {
         for (Player p:Bukkit.getOnlinePlayers()) if (menu(p.getOpenInventory().getTopInventory()) != null) p.closeInventory();
-        open.clear();
+        open.clear(); returning.clear();
     }
     private record Action(String permission, Consumer<Player> callback) {}
     private static final class Menu implements InventoryHolder {

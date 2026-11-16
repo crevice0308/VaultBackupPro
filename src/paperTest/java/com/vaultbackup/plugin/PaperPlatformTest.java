@@ -127,7 +127,7 @@ public final class PaperPlatformTest {
 
     /** A sender whose messages (components on Paper) and permissions the test controls. */
     private static CommandSender sender(Set<String> permissions, List<Component> received) {
-        return fake(CommandSender.class, Map.of(
+        return fake(org.bukkit.command.ConsoleCommandSender.class, Map.of(
                 "hasPermission", a -> permissions.contains(String.valueOf(a[0])),
                 "getName", a -> "fixture-console",
                 "sendMessage", a -> { for (Object value : a) if (value instanceof Component c) received.add(c); return null; }));
@@ -281,6 +281,8 @@ public final class PaperPlatformTest {
         field(plugin, VaultBackupPlugin.class, "settings", null);
         BackupRecord record = new BackupRecord("20261116T000000000Z-0123456789ab", Instant.EPOCH, "fixture", Path.of("a.zip"), Path.of("a.properties"), 1, 1, 1, "0".repeat(64), 0);
         field(plugin, VaultBackupPlugin.class, "catalogue", List.of(record));
+        field(plugin, VaultBackupPlugin.class, "rejected", Map.of("20261116T000000000Z-ffffffffffff", "fixture: failed verification"));
+        field(plugin, VaultBackupPlugin.class, "catalogueLoaded", true);
         CommandActions actions = new CommandActions(plugin);
         PaperCommands commands = new PaperCommands(plugin, actions);
         CommandDispatcher<CommandSourceStack> dispatcher = new CommandDispatcher<>();
@@ -291,6 +293,15 @@ public final class PaperPlatformTest {
         try { dispatcher.execute("backup help", source); throw new AssertionError("command visible without any permission"); }
         catch (CommandSyntaxException hidden) { checks++; }
         check(received.isEmpty(), "a sender without permissions gets nothing from the plugin");
+
+        // A command block holds every permission, and still does not even see the command.
+        CommandSender block = fake(org.bukkit.command.BlockCommandSender.class, Map.of("hasPermission", a -> true, "isOp", a -> true, "getName", a -> "@"));
+        CommandSourceStack blockSource = fake(CommandSourceStack.class, Map.of("getSender", a -> block));
+        for (String attempt : List.of("backup", "backup help", "backup create", "backup delete " + record.id(), "vaultbackup reload")) {
+            try { dispatcher.execute(attempt, blockSource); throw new AssertionError("a command block ran: " + attempt); }
+            catch (CommandSyntaxException hidden) { checks++; }
+        }
+        check(dispatcher.getRoot().getChildren().stream().noneMatch(node -> node.canUse(blockSource)), "the command is not offered to a command block");
 
         permissions.addAll(List.of("vaultbackup.delete", "vaultbackup.restore"));
         check(dispatcher.execute("backup help", source) == 1, "help runs once any permission is held");
@@ -316,9 +327,9 @@ public final class PaperPlatformTest {
 
         ParseResults<CommandSourceStack> parsed = dispatcher.parse("backup delete ", source);
         List<String> suggested = dispatcher.getCompletionSuggestions(parsed).get().getList().stream().map(Suggestion::getText).toList();
-        check(suggested.equals(List.of(record.id())), "backup ids are suggested to a sender who may delete");
+        check(suggested.equals(List.of(record.id(), "20261116T000000000Z-ffffffffffff")), "delete suggests verified backups and archives that failed verification");
         suggested = dispatcher.getCompletionSuggestions(dispatcher.parse("backup restore ", source)).get().getList().stream().map(Suggestion::getText).toList();
-        check(suggested.contains(record.id()) && suggested.contains("cancel"), "restore suggests ids and cancel");
+        check(suggested.contains(record.id()) && suggested.contains("cancel") && !suggested.contains("20261116T000000000Z-ffffffffffff"), "restore suggests verified ids and cancel, never an archive that failed verification");
         permissions.remove("vaultbackup.delete");
         suggested = dispatcher.getCompletionSuggestions(dispatcher.parse("backup delete ", source)).get().getList().stream().map(Suggestion::getText).toList();
         check(suggested.isEmpty(), "backup ids are not disclosed without the permission");

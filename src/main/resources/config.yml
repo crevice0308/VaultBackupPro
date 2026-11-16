@@ -24,13 +24,22 @@ backup:
     - 'logs/**'
     - 'cache/**'
     - '*.log'
+    - '**/*.log'
     - '**/*.lock'
     - '**/session.lock'
     - 'crash-reports/**'
     # Paper console input history changes during ordinary console commands.
     - '.paper/console_history'
+    # ext4 などのボリューム直下にある、管理者以外は読めないフォルダー。
+    - 'lost+found/**'
+  # パターンは「/」区切りで、* は 1 階層内、** は複数階層に一致します。
+  # ワイルドカードのないパターン（例: plugins/Example）は、そのフォルダー以下すべてを対象にします。
+  # ! による否定、{a,b}、[abc] には対応していません。
+  # 読み取れない・名前を保存できないファイルがあるとバックアップ全体を拒否し、該当パスをすべて表示します。
 
 # 処理中または復元予約中の自動実行はスキップし、重複実行しません。
+# 間隔は最新のバックアップから数え、再起動をまたいで引き継ぎます。
+# バックアップが 1 件もない場合や、起動時点で間隔を過ぎている場合は、起動の約 2 分後に実行します。
 automatic:
   enabled: true
   interval-minutes: 60
@@ -54,7 +63,10 @@ restore:
   helper-jar: ../VaultBackup-state/helper/vaultbackup-restore.jar
   # 予約後もサーバーは稼働します。自動再起動を無効化し、手動で停止してください。
   # 復元はサーバー停止処理への到達と JVM 完全終了の両方を確認してから実行します。
+  # Paper・Purpur ではサーバーが停止中であることを API で確認します。
+  # Spigot には確認する API がないため、プラグインの無効化から 10 分以内に JVM が終了した場合を停止とみなします。
   # 停止処理を伴う障害終了も対象となり得ます。自動再起動は行いません。
+  # /reload やプラグインの再読み込みを行うと、予約は取り消されます。
   # 停止前の取り消し: /backup restore cancel（適用開始後は不可）
 
 notifications:

@@ -20,6 +20,9 @@ final class BackupCommands implements CommandExecutor, TabCompleter {
     BackupCommands(CommandActions actions) { this.actions = actions; }
 
     @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (!CommandActions.acceptable(sender)) {
+            actions.plugin().tell(sender, actions.plugin().text("permission.sender"), false); return true;
+        }
         if (args.length == 0) { actions.open(sender); return true; }
         try {
             switch (args[0].toLowerCase(Locale.ROOT)) {

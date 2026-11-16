@@ -54,6 +54,17 @@ public final class PluginSettingsTest {
   for(String older:List.of("1.21.11","26.1","26.1.2")){if(BukkitPlatform.compareVersions(older,minimum)>=0)throw new AssertionError(older+" must be below the minimum");checks++;}
   for(String ok:List.of("26.2","26.2.0","26.2.1","26.3","26.4","27.1")){if(BukkitPlatform.compareVersions(ok,minimum)<0)throw new AssertionError(ok+" must satisfy the minimum");checks++;}
   if(BukkitPlatform.compareVersions("26.3.0",verified)!=0||BukkitPlatform.compareVersions("26.4",verified)<=0||BukkitPlatform.compareVersions("26.10","26.9")<=0)throw new AssertionError("numeric version order");checks++;
+  // The automatic interval counts from the newest backup, also across restarts.
+  java.time.Instant now=java.time.Instant.parse("2026-11-16T04:00:00Z");java.time.Duration settle=VaultBackupPlugin.AUTOMATIC_SETTLE;
+  if(!VaultBackupPlugin.automaticDue(now,null,1440).equals(now.plus(settle)))throw new AssertionError("no backup yet: due once the server has settled");checks++;
+  if(!VaultBackupPlugin.automaticDue(now,now.minus(java.time.Duration.ofHours(23)),1440).equals(now.plus(java.time.Duration.ofHours(1))))throw new AssertionError("due one interval after the newest backup");checks++;
+  if(!VaultBackupPlugin.automaticDue(now,now.minus(java.time.Duration.ofHours(25)),1440).equals(now.plus(settle)))throw new AssertionError("an overdue backup waits only for the settle time");checks++;
+  if(!VaultBackupPlugin.automaticDue(now,now.minus(java.time.Duration.ofMinutes(1439)),1440).equals(now.plus(settle)))throw new AssertionError("never during startup itself");checks++;
+  if(!VaultBackupPlugin.automaticDue(now,now.plus(java.time.Duration.ofDays(3)),60).equals(now.plus(java.time.Duration.ofHours(1))))throw new AssertionError("a backup dated in the future postpones by one interval at most");checks++;
+  // A server restarted every day with a daily interval used to never make an automatic backup.
+  java.time.Instant newest=null;int made=0;
+  for(int day=0;day<5;day++){java.time.Instant boot=now.plus(java.time.Duration.ofDays(day));java.time.Instant due=VaultBackupPlugin.automaticDue(boot,newest,1440);if(due.isBefore(boot.plus(java.time.Duration.ofHours(23)))){newest=due;made++;}}
+  if(made!=5)throw new AssertionError("daily restarts with a daily interval made "+made+" backups in 5 days");checks++;
   if(BukkitPlatform.compareVersions(verified,minimum)<0)throw new AssertionError("verified version below minimum");checks++;
   // plugin.yml must agree with the code: same minimum version, and the command the code registers.
   var pluginYml=new YamlConfiguration();pluginYml.loadFromString(Files.readString(Path.of(args[1])));

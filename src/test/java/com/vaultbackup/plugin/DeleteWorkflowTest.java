@@ -157,9 +157,12 @@ public final class DeleteWorkflowTest {
             AtomicBoolean busy=new AtomicBoolean(),cancelled=new AtomicBoolean();
             field(plugin,VaultBackupPlugin.class,"busy",busy);field(plugin,VaultBackupPlugin.class,"cancelled",cancelled);
             field(plugin,VaultBackupPlugin.class,"operation","operation.idle");field(plugin,VaultBackupPlugin.class,"progress","Ready");
+            // This object is allocated without running field initialisers.
+            field(plugin,VaultBackupPlugin.class,"rejected",Map.of());field(plugin,VaultBackupPlugin.class,"catalogueLoaded",true);
+            field(plugin,VaultBackupPlugin.class,"autosave",new java.util.LinkedHashSet<>());
             Set<String> permissions=new HashSet<>(List.of("vaultbackup.delete","vaultbackup.restore","vaultbackup.list","vaultbackup.status"));
             List<String> messages=new ArrayList<>();
-            CommandSender sender=(CommandSender)Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),new Class<?>[]{CommandSender.class},(p,m,a)->{
+            CommandSender sender=(CommandSender)Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),new Class<?>[]{org.bukkit.command.ConsoleCommandSender.class},(p,m,a)->{
                 if(m.getName().equals("hasPermission"))return permissions.contains(a[0]);
                 if(m.getName().equals("getName"))return "fixture-console";
                 if(m.getName().equals("sendMessage")) { for(Object v:a)if(v instanceof String text)messages.add(text);return null; }
@@ -171,6 +174,20 @@ public final class DeleteWorkflowTest {
             BackupCommands commands=new BackupCommands(new CommandActions(plugin));
             BackupRecord first=engine.createBackup("first"),second=engine.createBackup("second");
             field(plugin,VaultBackupPlugin.class,"catalogue",engine.listBackups());
+            // A command block is an operator as far as permissions go. It is refused for what it is.
+            List<String> blockMessages=new ArrayList<>();
+            CommandSender block=(CommandSender)Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),new Class<?>[]{org.bukkit.command.BlockCommandSender.class},(p,m,a)->{
+                if(m.getName().equals("hasPermission") || m.getName().equals("isOp"))return true;
+                if(m.getName().equals("getName"))return "@";
+                if(m.getName().equals("sendMessage")) { for(Object v:a)if(v instanceof String text)blockMessages.add(text);return null; }
+                return defaultValue(m.getReturnType());
+            });
+            for(String[] attempt:new String[][]{{"delete",first.id()},{"create"},{"restore",first.id()},{"reload"},{"auto","off"},{}})commands.onCommand(block,null,"backup",attempt);
+            check(io.queue.isEmpty() && !busy.get() && Files.exists(first.zipPath()) && blockMessages.size()==6 && blockMessages.stream().allMatch(line->line.contains("player, the console or RCON")),
+                    "a command block with every permission cannot run any part of /backup");
+            check(commands.onTabComplete(block,null,"backup",new String[]{""}).isEmpty() && commands.onTabComplete(block,null,"backup",new String[]{"delete",""}).isEmpty(),"and learns no subcommand or backup ID from completion");
+            plugin.delete(block,first.id());plugin.create(block,"manual");plugin.requestRestore(block,first.id());
+            check(io.queue.isEmpty() && !busy.get(),"the actions themselves refuse such a sender as well");
             commands.onCommand(sender,null,"backup",new String[]{"delete",first.id(),"confirm"});
             check(io.queue.isEmpty() && Files.exists(first.zipPath()),"legacy confirm syntax performs no deletion");
             check(contains(messages,"Usage: /backup delete <id>"),"legacy confirm syntax reports direct usage");
@@ -209,6 +226,10 @@ public final class DeleteWorkflowTest {
             check(diagnosticCount.get()==2,"unexpected failures use diagnostic path");
             messages.clear();commands.onCommand(sender,null,"backup",new String[]{"restore",recreated.id(),"confirm"});
             check(io.queue.isEmpty() && contains(messages,"Usage:"),"legacy restore confirm never launches");
+            // Without the bundled helper there is no hash to pin: no restore is offered, whatever file sits at the helper path.
+            messages.clear();commands.onCommand(sender,null,"backup",new String[]{"restore",recreated.id()});
+            check(io.queue.isEmpty() && !busy.get() && contains(messages,"restore helper is not available"),"a plugin without its bundled helper accepts no restore");
+            field(plugin,VaultBackupPlugin.class,"helperAvailable",true);
             commands.onCommand(sender,null,"backup",new String[]{"restore",recreated.id()});
             check(io.queue.size()==1 && busy.get() && contains(messages,"Verifying"),"direct restore starts verification immediately");
             commands.onCommand(sender,null,"backup",new String[]{"restore",recreated.id()});
@@ -243,7 +264,7 @@ public final class DeleteWorkflowTest {
             String menus=Files.readString(source.resolve("BackupMenus.java")), pluginSource=Files.readString(source.resolve("VaultBackupPlugin.java"));
             sourceCheck(menus.contains("who -> openInfo(who,record.id(),current)"),"list selection only opens details");
             sourceCheck(menus.contains("who.closeInventory(); plugin.requestRestore(who,id);"),"explicit restore action closes old menu and reserves directly");
-            sourceCheck(menus.contains("who.closeInventory(); plugin.delete(who,id);"),"explicit delete action closes old menu and deletes directly");
+            sourceCheck(menus.contains("who.closeInventory(); plugin.delete(who,id,true);"),"explicit delete action closes old menu and deletes directly");
             sourceCheck(!menus.contains("Warning(") && !menus.contains("Final(") && !menus.contains("confirmtwice"),"no warning/final modal routes remain");
             sourceCheck(menus.contains("open.get(player.getUniqueId()) != m") && menus.contains("!plugin.allowed(player,action.permission)"),"queued clicks recheck identity and permission");
             sourceCheck(menus.contains("!event.isLeftClick() || event.isShiftClick()") && menus.contains("ClickType.LEFT"),"non-explicit clicks cannot trigger actions");
@@ -260,12 +281,18 @@ public final class DeleteWorkflowTest {
             BackupMenus menusObject=new BackupMenus(plugin);field(plugin,VaultBackupPlugin.class,"menus",menusObject);
             permissions.addAll(List.of("vaultbackup.admin","vaultbackup.gui"));
             InventoryView[] openView={null};UUID playerId=UUID.randomUUID();
+            // What a player has open when no container is: their own inventory.
+            Inventory ownTop=inventory(null,5);
+            InventoryView ownView=(InventoryView)Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),new Class<?>[]{InventoryView.class},(p,m,a)->switch(m.getName()) {
+                case "getTopInventory" -> ownTop;
+                default -> defaultValue(m.getReturnType());
+            });
             Player player=(Player)Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),new Class<?>[]{Player.class},(p,m,a)->switch(m.getName()) {
                 case "getUniqueId" -> playerId;
                 case "getName" -> "fixture-player";
                 case "isOnline" -> true;
                 case "hasPermission" -> permissions.contains(a[0]);
-                case "getOpenInventory" -> openView[0];
+                case "getOpenInventory" -> openView[0]!=null?openView[0]:ownView;
                 case "openInventory" -> {
                     if(openView[0]!=null)menusObject.close(new InventoryCloseEvent(openView[0]));
                     openView[0]=view((Player)p,(Inventory)a[0]);yield openView[0];
@@ -296,6 +323,17 @@ public final class DeleteWorkflowTest {
             check(io.queue.size()==1 && busy.get() && openView[0]==null,"GUI double-click dispatches one direct delete and closes stale menu");
             io.runOne();drainMain(main);
             check(!Files.exists(guiTarget.zipPath()) && Files.exists(recreated.zipPath()),"GUI deletes only its server-owned selected target");
+            check(openView[0]!=null && openView[0]!=detailView,"a delete started from the menu returns to the list");
+            // The same delete typed as a command never opens a menu on the player's screen.
+            BackupRecord typed=engine.createBackup("typed");field(plugin,VaultBackupPlugin.class,"catalogue",engine.listBackups());
+            player.closeInventory();plugin.delete(player,typed.id());io.runOne();drainMain(main);
+            check(!Files.exists(typed.zipPath()) && openView[0]==null,"a delete typed as a command opens no menu");
+            // Started from the menu, but the player opened a chest before it finished: nothing is put over it.
+            BackupRecord chest=engine.createBackup("chest");field(plugin,VaultBackupPlugin.class,"catalogue",engine.listBackups());
+            plugin.delete(player,chest.id(),true);
+            menusObject.opened(new org.bukkit.event.inventory.InventoryOpenEvent(view(player,inventory(null,27))));
+            io.runOne();drainMain(main);
+            check(!Files.exists(chest.zipPath()) && openView[0]==null,"the list is not put over something the player opened meanwhile");
             click(menusObject,detailView,15,ClickType.LEFT);drainMain(main);
             check(io.queue.isEmpty(),"stale GUI view cannot replay an action");
             menusObject.openList(player,0);click(menusObject,openView[0],0,ClickType.LEFT);drainMain(main);
@@ -322,7 +360,7 @@ public final class DeleteWorkflowTest {
             check(!contains(messages,"Verified backups after retention:"),"unreadable store never invents a current count");
             Files.move(hidden,backup);
             permissions.add("vaultbackup.create");
-            field(plugin,VaultBackupPlugin.class,"autosave",new java.util.LinkedHashMap<>());
+            field(plugin,VaultBackupPlugin.class,"autosave",new java.util.LinkedHashSet<>());
             messages.clear();commands.onCommand(sender,null,"backup",new String[]{"create","immediate"});
             check(contains(messages,"Starting backup. Saving worlds"),"create immediately acknowledges before mandatory save");
             check(!contains(messages,"Saving complete") && !contains(messages,"Backup created:"),"acceptance does not falsely claim saving or backup completion");

@@ -3,9 +3,13 @@ package com.vaultbackup.plugin;
 
 import com.vaultbackup.core.BackupRecord;
 import org.bukkit.command.CommandSender;
+import org.bukkit.command.ConsoleCommandSender;
+import org.bukkit.command.RemoteConsoleCommandSender;
 import org.bukkit.entity.Player;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
@@ -27,8 +31,16 @@ final class CommandActions {
 
     VaultBackupPlugin plugin() { return plugin; }
 
+    /**
+     * /backup is for people and for the console. A command block or a command minecart counts as an
+     * operator for permission checks, so it is refused by what it is, whatever its permissions say.
+     */
+    static boolean acceptable(CommandSender sender) {
+        return sender instanceof Player || sender instanceof ConsoleCommandSender || sender instanceof RemoteConsoleCommandSender;
+    }
+
     /** Silent check, for deciding what to show. Actions report a refusal themselves. */
-    static boolean may(CommandSender sender, String action) { return sender.hasPermission("vaultbackup." + action); }
+    static boolean may(CommandSender sender, String action) { return acceptable(sender) && sender.hasPermission("vaultbackup." + action); }
 
     /** True when the sender may use at least one part of the command and may therefore see it. */
     static boolean mayUseAny(CommandSender sender) {
@@ -44,7 +56,7 @@ final class CommandActions {
     }
 
     void help(CommandSender sender) {
-        if (!mayUseAny(sender)) { fail(sender, "permission.none"); return; }
+        if (!mayUseAny(sender)) { fail(sender, acceptable(sender) ? "permission.none" : "permission.sender"); return; }
         plugin.tell(sender, plugin.text("command.help.title", plugin.version()), true);
         line(sender, "gui", "gui");
         line(sender, "create", "create");
@@ -86,6 +98,12 @@ final class CommandActions {
             records.stream().skip((page - 1L) * PAGE_SIZE).limit(PAGE_SIZE).forEach(record -> plugin.tell(sender,
                     record.id() + " | " + record.createdAt() + " | " + VaultBackupPlugin.humanBytes(record.compressedBytes())
                             + " | " + record.label() + (record.unstableEntries() > 0 ? " | " + plugin.text("list.unstable", record.unstableEntries()) : ""), true));
+            // Archives that are in the store but cannot be trusted: never listed as backups, never hidden either.
+            Map<String, String> rejected = plugin.rejectedArchives();
+            if (rejected.isEmpty()) return;
+            fail(sender, "list.rejected", rejected.size());
+            rejected.entrySet().stream().sorted(Map.Entry.comparingByKey()).limit(PAGE_SIZE)
+                    .forEach(entry -> fail(sender, "list.rejectedentry", entry.getKey(), entry.getValue().replaceAll("\\p{Cntrl}", " ")));
         });
     }
 
@@ -125,6 +143,9 @@ final class CommandActions {
     /** Backup IDs for completion; never disclosed to a sender who may not act on them. */
     List<String> backupIds(CommandSender sender, String action) {
         if (!may(sender, action)) return List.of();
-        return plugin.backups().stream().map(BackupRecord::id).limit(100).toList();
+        List<String> ids = new ArrayList<>(plugin.backups().stream().map(BackupRecord::id).limit(100).toList());
+        // An archive that failed verification can be deleted by its ID, and by nothing else.
+        if (action.equals("delete")) plugin.rejectedArchives().keySet().stream().sorted().limit(100 - ids.size()).forEach(ids::add);
+        return ids;
     }
 }
