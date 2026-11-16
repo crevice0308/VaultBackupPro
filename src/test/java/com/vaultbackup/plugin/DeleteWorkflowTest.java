@@ -368,6 +368,47 @@ public final class DeleteWorkflowTest {
             check(!busy.get() && io.queue.isEmpty(),"failed fixture save cannot enqueue compression or leave busy state");
             sourceCheck(pluginSource.indexOf("RestoreCoordinator.start(") < pluginSource.indexOf("engine = new BackupEngine(settings.options())")
                     && !pluginSource.contains("createPrivateDirectories(settings.backupDirectory())"),"root guard precedes archive directory setup");
+            // A command changes exactly one value of config.yml. What was edited by hand needs an explicit reload.
+            List<String> logged=new ArrayList<>();
+            logger.addHandler(new java.util.logging.Handler() {
+                @Override public void publish(java.util.logging.LogRecord record) { logged.add(record.getMessage()); }
+                @Override public void flush() {}
+                @Override public void close() {}
+            });
+            Path data=Files.createDirectory(fixture.resolve("plugin-data")),realConfig=data.resolve("real-config.yml"),config=data.resolve("config.yml");
+            field(plugin,JavaPlugin.class,"dataFolder",data.toFile());
+            org.bukkit.configuration.file.YamlConfiguration yaml=new org.bukkit.configuration.file.YamlConfiguration();
+            yaml.set("language","en_US");yaml.set("storage.server-root",root.toString());yaml.set("storage.backup-directory",backup.toString());
+            yaml.set("storage.state-directory",state.toString());yaml.set("restore.helper-jar",helper.toString());
+            yaml.set("backup.include",List.of("**"));yaml.set("backup.exclude",List.of("logs/**"));yaml.set("automatic.enabled",false);
+            Files.writeString(realConfig,yaml.saveToString());
+            boolean links=true;
+            try {Files.createSymbolicLink(config,realConfig.getFileName());} catch(UnsupportedOperationException | IOException noLinks) {links=false;Files.move(realConfig,config);}
+            boolean posix=Files.getFileStore(data).supportsFileAttributeView(java.nio.file.attribute.PosixFileAttributeView.class);
+            if(posix)Files.setPosixFilePermissions(links?realConfig:config,java.nio.file.attribute.PosixFilePermissions.fromString("rw-r-----"));
+            field(plugin,VaultBackupPlugin.class,"settings",PluginSettings.read(config));
+            BackupEngine before=engine;
+            permissions.addAll(List.of("vaultbackup.configure","vaultbackup.reload"));
+            messages.clear();logged.clear();commands.onCommand(sender,null,"backup",new String[]{"interval","30"});
+            check(contains(messages,"Setting updated: automatic.interval-minutes") && PluginSettings.read(config).intervalMinutes()==30 && plugin.settings().intervalMinutes()==30,"a setting command changes its one value in the file and in memory");
+            check(contains(logged,"[audit] fixture-console: changed a setting: automatic.interval-minutes = 30"),"who changed which setting is logged");
+            var engineField=VaultBackupPlugin.class.getDeclaredField("engine");engineField.setAccessible(true);
+            check(engineField.get(plugin)==before,"the engine, with what it has verified, is kept when nothing it uses changed");
+            if(links)check(Files.isSymbolicLink(config) && Files.readString(realConfig).contains("interval-minutes: 30"),"a linked config.yml stays a link to the same file");
+            if(posix)check(Files.getPosixFilePermissions(links?realConfig:config).equals(java.nio.file.attribute.PosixFilePermissions.fromString("rw-r-----")),"config.yml keeps its permissions");
+            // An edit made by hand: a different retention count, not yet applied.
+            org.bukkit.configuration.file.YamlConfiguration edited=new org.bukkit.configuration.file.YamlConfiguration();edited.load(config.toFile());
+            edited.set("retention.max-count",3);Files.writeString(links?realConfig:config,edited.saveToString());
+            messages.clear();commands.onCommand(sender,null,"backup",new String[]{"interval","15"});
+            check(contains(messages,"have not been applied yet") && plugin.settings().intervalMinutes()==30 && plugin.settings().retentionCount()==20
+                    && PluginSettings.read(config).intervalMinutes()==30,"a command never applies hand edits as a side effect, and changes nothing");
+            messages.clear();commands.onCommand(sender,null,"backup",new String[]{"reload"});
+            check(contains(messages,"Configuration reloaded") && plugin.settings().retentionCount()==3,"an explicit reload applies them");
+            messages.clear();commands.onCommand(sender,null,"backup",new String[]{"interval","15"});
+            check(contains(messages,"Setting updated") && plugin.settings().intervalMinutes()==15 && plugin.settings().retentionCount()==3,"and commands work again afterwards");
+            Files.writeString(links?realConfig:config,"language: [not, a, language]\n");
+            messages.clear();commands.onCommand(sender,null,"backup",new String[]{"reload"});
+            check(contains(messages,"Configuration rejected") && plugin.settings().intervalMinutes()==15,"an invalid file is rejected and the active settings stay");
             System.out.println("PASS DeleteWorkflowTest ("+checks+" executed checks; "+sourceChecks+" source-only GUI wiring checks; includes simulated Bukkit events, no real client or helper launch)");
         } finally {
             try(var paths=Files.walk(fixture)) { for(Path path:paths.sorted(Comparator.reverseOrder()).toList())Files.deleteIfExists(path); }
