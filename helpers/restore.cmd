@@ -3,15 +3,26 @@ setlocal
 rem Usage: restore.cmd C:\absolute\state\restore-jobs\JOB\job.properties [--recover]
 if "%~1"=="" goto usage
 if not "%~3"=="" goto usage
+if not "%~2"=="" if not "%~2"=="--recover" goto usage
+rem The helper shipped beside this script, unless VAULTBACKUP_HELPER_JAR names another one
+rem (for example the copy the plugin installed: state-directory\helper\vaultbackup-restore.jar).
 set "HELPER=%VAULTBACKUP_HELPER_JAR%"
-if not defined HELPER set "HELPER=%~dp0vaultbackup-restore-1.2.1.jar"
+if not defined HELPER set "HELPER=%~dp0vaultbackup-restore.jar"
+if not exist "%HELPER%" (
+  echo Restore helper not found: "%HELPER%"
+  echo Set VAULTBACKUP_HELPER_JAR to its path.
+  exit /b 2
+)
+if not exist "%~1" (
+  echo Job file not found: "%~1"
+  exit /b 2
+)
 set "JAVA=java"
 if defined JAVA_HOME set "JAVA=%JAVA_HOME%\bin\java.exe"
 echo Japanese instructions: see docs\OFFLINE-RESTORE.md (UTF-8).
 echo Cancelled jobs can never be resumed; no automatic restart is performed.
 echo Disable hosting auto-restart and confirm the server JVM is completely stopped.
 if "%~2"=="--recover" goto recover
-if not "%~2"=="" goto usage
 "%JAVA%" -jar "%HELPER%" --job "%~1" --manual --i-confirm-server-stopped
 exit /b %errorlevel%
 :recover

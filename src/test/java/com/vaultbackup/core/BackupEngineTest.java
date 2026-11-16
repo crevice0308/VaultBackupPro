@@ -28,6 +28,7 @@ public final class BackupEngineTest {
 
     public static void main(String[] args) throws Exception {
         if (args.length == 2 && args[0].equals("--locale-child")) { localeChild(Path.of(args[1])); return; }
+        if (args.length == 3 && args[0].equals("--memory-child")) { memoryChild(Path.of(args[1]), Path.of(args[2])); return; }
         fixture = Files.createTempDirectory("vaultbackup-core-test-");
         try {
             roundTripAndExclusions();
@@ -793,12 +794,18 @@ public final class BackupEngineTest {
             manifest.append(line("F", name, 0, hash(new byte[0])));
         }
         crafted(zip, metadata, parts, manifest.toString(), 0, 400);
-        Runtime runtime = Runtime.getRuntime();
-        System.gc();
-        long before = runtime.totalMemory() - runtime.freeMemory();
         equal(engine.verify(id).entryCount(), 400, "a deep but valid archive verifies");
-        long grown = runtime.totalMemory() - runtime.freeMemory() - before;
-        check(grown < 256L * 1024 * 1024, "path bookkeeping stays proportional to the number of components (grew " + grown / (1024 * 1024) + " MiB)");
+        // Keeping every prefix needed about 1.6 GiB for this archive. A JVM limited to 96 MiB must be
+        // able to verify it; unlike a heap measurement, that does not depend on when a collector runs.
+        String launcher = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+        ProcessBuilder constrained = new ProcessBuilder(launcher, "-Xmx96m", "-cp", System.getProperty("java.class.path"),
+                BackupEngineTest.class.getName(), "--memory-child", zip.toString(), metadata.toString());
+        constrained.environment().remove("JAVA_TOOL_OPTIONS");
+        constrained.redirectErrorStream(true);
+        Process limited = constrained.start();
+        String limitedOutput = new String(limited.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        check(limited.waitFor(120, TimeUnit.SECONDS) && limited.exitValue() == 0 && limitedOutput.contains("MEMORY-CHILD-OK 400"),
+                "path bookkeeping stays proportional to the number of components: " + limitedOutput);
         // More implied directories than entries allow is refused instead of tracked.
         BackupOptions few = options(engine.options(), List.of(), List.of(), 400, 1 << 20, 1 << 24, 10000);
         crafted(zip, metadata, parts, manifest.toString(), 0, 400);
@@ -893,6 +900,13 @@ public final class BackupEngineTest {
         String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         check(process.waitFor(60, TimeUnit.SECONDS) && process.exitValue() == 0, "child JVM without a UTF-8 locale: " + output);
         check(output.contains("LOCALE-CHILD-OK"), "child completed its checks: " + output);
+    }
+
+    private static void memoryChild(Path zip, Path metadata) throws Exception {
+        Path base = zip.toAbsolutePath().getParent().getParent();
+        BackupOptions limits = BackupOptions.defaults(base.resolve("server"), base.resolve("backups"), base.resolve("state"));
+        BackupRecord record = BackupEngine.verifyArchive(zip, metadata, limits, () -> false, ignored -> {});
+        System.out.println("MEMORY-CHILD-OK " + record.entryCount());
     }
 
     private static void localeChild(Path base) throws Exception {

@@ -6,5 +6,6 @@ dist/
 __pycache__/
 *.pyc
 *.zip
+# Raw evidence stays outside the repository; the reviewed summaries are tracked.
 docs/test-evidence/**
-!docs/test-evidence/artifact-inspection.json
+!docs/test-evidence/*.json
