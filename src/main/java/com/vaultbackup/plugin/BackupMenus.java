@@ -83,7 +83,7 @@ final class BackupMenus implements Listener {
         int start = current*45;
         for (int i=start; i<Math.min(start+45,records.size()); i++) {
             BackupRecord record = records.get(i);
-            List<String> lore = new ArrayList<>(List.of(t("common.created",record.createdAt()),t("common.label",record.label()),
+            List<String> lore = new ArrayList<>(List.of(t("common.created",VaultBackupPlugin.when(record.createdAt())),t("common.label",record.label()),
                     t("common.archive",VaultBackupPlugin.humanBytes(record.compressedBytes())),t("common.entries",record.entryCount())));
             if (record.unstableEntries() > 0) lore.add(t("list.unstable",record.unstableEntries()));
             if (record.vanishedEntries() > 0) lore.add(t("list.vanished",record.vanishedEntries()));
@@ -108,7 +108,7 @@ final class BackupMenus implements Listener {
         BackupRecord record = plugin.find(id).orElse(null);
         if (record == null) { plugin.tell(p,t("list.missing"),false); openList(p,page); return; }
         Menu m = make(p,t("menu.info"),27);
-        m.display(4,Material.WRITABLE_BOOK,id,List.of(t("common.created",record.createdAt()),t("common.label",record.label()),
+        m.display(4,Material.WRITABLE_BOOK,id,List.of(t("common.created",VaultBackupPlugin.when(record.createdAt())),t("common.label",record.label()),
                 t("common.archive",VaultBackupPlugin.humanBytes(record.compressedBytes())),t("common.original",VaultBackupPlugin.humanBytes(record.totalBytes())),
                 t("common.entries",record.entryCount()),"SHA-256: "+record.sha256().substring(0,16)+"…",
                 record.unstableEntries() > 0 ? t("list.unstable",record.unstableEntries()) : t("list.stable"),
@@ -147,7 +147,7 @@ final class BackupMenus implements Listener {
         Menu m=make(p,t("menu.storage.title"),27);
         long used=plugin.backups().stream().mapToLong(BackupRecord::compressedBytes).sum();
         m.display(10,Material.CHEST,t("menu.storage.backups"),List.of(s.backupDirectory().toString(),t("menu.storage.used",VaultBackupPlugin.humanBytes(used)),t("common.free",VaultBackupPlugin.humanBytes(plugin.freeSpace())),t("menu.catalogue.count",plugin.backups().size())));
-        m.display(12,Material.COMPARATOR,t("menu.status"),List.of(plugin.operation(),plugin.progress(),t("common.next",plugin.nextAutomatic()==null?t("common.off"):plugin.nextAutomatic())));
+        m.display(12,Material.COMPARATOR,t("menu.status"),List.of(plugin.operation(),plugin.progress(),t("common.next",plugin.nextAutomatic()==null?t("common.off"):VaultBackupPlugin.when(plugin.nextAutomatic()))));
         m.display(14,Material.IRON_DOOR,t("menu.storage.helper"),List.of(s.helperJar().toString(),t("common.available",yes(plugin.helperAvailable())),t("common.state",s.stateDirectory()),t("menu.storage.offline")));
         m.put(16,Material.WRITABLE_BOOK,t("menu.storage.settings"),List.of(t("menu.storage.edit"),t("menu.storage.restart"),t("menu.storage.external")),"configure",who -> plugin.tell(who,t("menu.storage.message"),true));
         if (plugin.restoreReserved()) {

@@ -83,6 +83,15 @@ public final class PluginSettingsTest {
   java.time.Instant newest=null;int made=0;
   for(int day=0;day<5;day++){java.time.Instant boot=now.plus(java.time.Duration.ofDays(day));java.time.Instant due=VaultBackupPlugin.automaticDue(boot,newest,1440);if(due.isBefore(boot.plus(java.time.Duration.ofHours(23)))){newest=due;made++;}}
   if(made!=5)throw new AssertionError("daily restarts with a daily interval made "+made+" backups in 5 days");checks++;
+  // The advice to switch to a UTF-8 locale is right only for a server without any locale.
+  if(!"startup.encoding".equals(VaultBackupPlugin.encodingNotice("ANSI_X3.4-1968","Linux"))||!"startup.encoding".equals(VaultBackupPlugin.encodingNotice("","Linux"))||!"startup.encoding".equals(VaultBackupPlugin.encodingNotice("no-such-charset","Linux")))throw new AssertionError("no locale: warn and name the remedy");checks++;
+  if(!"startup.encodingother".equals(VaultBackupPlugin.encodingNotice("EUC-JP","Linux")))throw new AssertionError("another encoding is kept, with a note for manual restores");checks++;
+  if(VaultBackupPlugin.encodingNotice("UTF-8","Linux")!=null||VaultBackupPlugin.encodingNotice("utf8","Mac OS X")!=null||VaultBackupPlugin.encodingNotice("MS932","Windows 11")!=null)throw new AssertionError("UTF-8 and Windows need no notice");checks++;
+  // Times are shown as the administrator's clock reads them, not as UTC with nanoseconds.
+  java.time.Instant shown=java.time.Instant.parse("2026-11-16T11:38:46.124862205Z");
+  if(!VaultBackupPlugin.when(shown,java.time.ZoneId.of("Asia/Tokyo")).equals("2026-11-16 20:38:46 +09:00"))throw new AssertionError("time in the server's zone: "+VaultBackupPlugin.when(shown,java.time.ZoneId.of("Asia/Tokyo")));checks++;
+  if(!VaultBackupPlugin.when(shown,java.time.ZoneOffset.UTC).equals("2026-11-16 11:38:46 +00:00"))throw new AssertionError("time in UTC: "+VaultBackupPlugin.when(shown,java.time.ZoneOffset.UTC));checks++;
+  if(!VaultBackupPlugin.when(shown).equals(VaultBackupPlugin.when(shown,java.time.ZoneId.systemDefault())))throw new AssertionError("the default is the server's own time zone");checks++;
   if(BukkitPlatform.compareVersions(verified,minimum)<0)throw new AssertionError("verified version below minimum");checks++;
   // plugin.yml must agree with the code: same minimum version, and the command the code registers.
   var pluginYml=new YamlConfiguration();pluginYml.loadFromString(Files.readString(Path.of(args[1])));

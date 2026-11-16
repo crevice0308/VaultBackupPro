@@ -96,7 +96,7 @@ final class CommandActions {
             plugin.tell(sender, plugin.text("list.title", page, pages), true);
             if (records.isEmpty()) plugin.tell(sender, plugin.text("list.empty"), true);
             records.stream().skip((page - 1L) * PAGE_SIZE).limit(PAGE_SIZE).forEach(record -> plugin.tell(sender,
-                    record.id() + " | " + record.createdAt() + " | " + VaultBackupPlugin.humanBytes(record.compressedBytes())
+                    record.id() + " | " + VaultBackupPlugin.when(record.createdAt()) + " | " + VaultBackupPlugin.humanBytes(record.compressedBytes())
                             + " | " + record.label() + (record.unstableEntries() > 0 ? " | " + plugin.text("list.unstable", record.unstableEntries()) : "")
                             + (record.vanishedEntries() > 0 ? " | " + plugin.text("list.vanished", record.vanishedEntries()) : ""), true));
             // Archives that are in the store but cannot be trusted: never listed as backups, never hidden either.

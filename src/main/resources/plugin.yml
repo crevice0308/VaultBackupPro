@@ -2,8 +2,9 @@ name: VaultBackupPro
 # Filled in from the Gradle project version when the JAR is built.
 version: '${version}'
 main: com.vaultbackup.plugin.VaultBackupPlugin
-# Oldest server version the plugin loads on. It is built and checked against the current API
-# (26.3) and, because it uses only public API, also runs on newer versions.
+# Oldest server version the plugin loads on. The release JAR is compiled against this API (26.2);
+# the same sources are also compiled and link-checked against the current API (26.3). Newer
+# versions are not refused, because only public API is used, but nothing has been checked there.
 api-version: '26.2'
 author: VaultBackup
 description: 非同期バックアップと手動停止後の安全なオフライン復元

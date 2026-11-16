@@ -137,7 +137,7 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             });
             restores.consumeVerifiedReceipt().ifPresent(receipt -> tell(Bukkit.getConsoleSender(),
                     "\n========================================\n" + text("startup.success", receipt.backupId(), receipt.jobId(),
-                            receipt.completedAt(), receipt.rollbackDirectory()) + "\n========================================", true));
+                            when(receipt.completedAt()), receipt.rollbackDirectory()) + "\n========================================", true));
             restoreGuardStartupFailure = false;
             engine = new BackupEngine(settings.options());
             claimStorage(settings.backupDirectory());
@@ -214,13 +214,25 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         // POSIX file names are bytes. A JVM started without a UTF-8 locale cannot name non-ASCII files,
         // and the engine then refuses them. Windows uses UTF-16 file names whatever this property says.
         String encoding = System.getProperty("sun.jnu.encoding", "");
-        boolean utf8;
-        try { utf8 = java.nio.charset.Charset.forName(encoding).equals(java.nio.charset.StandardCharsets.UTF_8); }
-        catch (RuntimeException unknown) { utf8 = false; }
-        if (!utf8 && !System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win"))
-            getLogger().warning(text("startup.encoding", encoding.isEmpty() ? "?" : encoding));
+        String notice = encodingNotice(encoding, System.getProperty("os.name", ""));
+        if ("startup.encoding".equals(notice)) getLogger().warning(text(notice, encoding.isEmpty() ? "?" : encoding));
+        else if (notice != null) getLogger().info(text(notice, encoding));
         List<String> patterns = new ArrayList<>(checked.includes()); patterns.addAll(checked.excludes());
         for (String pattern : BackupEngine.unsupportedGlobSyntax(patterns)) getLogger().warning(text("settings.glob", pattern));
+    }
+
+    /**
+     * @return the message for a JVM whose file-name encoding is not UTF-8, or null when there is nothing to say.
+     *         Without a locale (C/POSIX) no non-ASCII name can be used at all, and a UTF-8 locale is the remedy.
+     *         A server that runs in another encoding keeps it: its existing file names are in that encoding,
+     *         and only a restore by hand has to use the same one.
+     */
+    static String encodingNotice(String encoding, String osName) {
+        if (osName.toLowerCase(Locale.ROOT).contains("win")) return null;
+        java.nio.charset.Charset names;
+        try { names = java.nio.charset.Charset.forName(encoding); } catch (RuntimeException unknown) { return "startup.encoding"; }
+        if (names.equals(java.nio.charset.StandardCharsets.UTF_8)) return null;
+        return names.equals(java.nio.charset.StandardCharsets.US_ASCII) ? "startup.encoding" : "startup.encodingother";
     }
 
     /**
@@ -388,6 +400,10 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
     }
     long freeSpace() { return freeSpace; }
     Instant nextAutomatic() { return nextAutomatic; }
+    private static final java.time.format.DateTimeFormatter WHEN = java.time.format.DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss xxx", Locale.ROOT);
+    /** A time as an administrator reads it: in the server's time zone, to the second, with the offset from UTC. */
+    static String when(Instant instant) { return when(instant, java.time.ZoneId.systemDefault()); }
+    static String when(Instant instant, java.time.ZoneId zone) { return WHEN.format(instant.atZone(zone)); }
     static String humanBytes(long bytes) {
         if (bytes < 1024) return bytes + " B";
         String[] units = {"KiB","MiB","GiB","TiB","PiB"};
@@ -971,7 +987,7 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         if (!allowed(sender,"status")) return;
         tell(sender,text("status.summary",operation(),progress(),catalogue.size(),humanBytes(freeSpace),
                 settings.automatic() ? text("common.minutes",settings.intervalMinutes()) : text("common.off")),true);
-        if (nextAutomatic != null) tell(sender,text("common.next",nextAutomatic),true);
+        if (nextAutomatic != null) tell(sender,text("common.next",when(nextAutomatic)),true);
         RestoreCoordinator.Status current = restoreStatus;
         if (current != null) tell(sender,text("restore.status",current.jobId(),current.backupId(),restoreState()),!restoreStatusUncertain);
         if (restoreReserved()) {
