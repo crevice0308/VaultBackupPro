@@ -569,7 +569,11 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         }
         if (!begin(sender, "operation.catalogue")) return;
         submit(() -> { try { updateCatalogue(revalidate); main(() -> { if (after != null) after.run(); }); }
-            catch (Throwable error) { if (!isCancelled()) reportFailure(sender, "job.list", error); }
+            catch (Throwable error) {
+                if (!isCancelled()) reportFailure(sender, "job.list", error);
+                // Stopped on purpose, for a reservation that is being cancelled: say so instead of never answering.
+                else if (sender != null) main(() -> tell(sender, text("list.interrupted"), false));
+            }
             finally { main(() -> {
                 finish();
                 // Somebody asked to cancel the restore reservation while this job ran; it was stopped for that.

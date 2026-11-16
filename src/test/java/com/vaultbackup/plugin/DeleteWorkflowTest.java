@@ -472,7 +472,8 @@ public final class DeleteWorkflowTest {
             commands.onCommand(sender,null,"backup",new String[]{"restore","cancel"});
             check(contains(messages,"Stopping the running catalogue verification") && cancelled.get() && io.queue.size()==1,"the cancellation is accepted and the catalogue job is told to stop");
             io.runOne();drainMain(main);
-            check(!contains(messages,"re-verified") && !contains(messages,"failed") && io.queue.size()==1 && busy.get(),"the stopped catalogue job reports neither success nor failure, and the cancellation follows by itself");
+            check(!contains(messages,"re-verified") && !contains(messages,"failed") && contains(messages,"was stopped so that a restore reservation could be cancelled") && io.queue.size()==1 && busy.get(),
+                    "the stopped catalogue job reports neither success nor failure but says why it stopped, and the cancellation follows by itself");
             io.runOne();drainMain(main);
             check(!busy.get() && !plugin.restoreReserved() && io.queue.isEmpty() && contains(messages,"Restore reservation cancelled"),"the reservation is cancelled without a second command");
             System.out.println("PASS DeleteWorkflowTest ("+checks+" executed checks; "+sourceChecks+" source-only GUI wiring checks; includes simulated Bukkit events, no real client or helper launch)");
