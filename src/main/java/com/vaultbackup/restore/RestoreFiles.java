@@ -7,8 +7,10 @@ import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.security.*;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
@@ -166,17 +168,99 @@ final class RestoreFiles {
                 required(p,"stage"),required(p,"rollback"),required(p,"failed"),
                 required(p,"outcome"),required(p,"completedAt"));
     }
-    static void requireDeadParent(Properties job) throws IOException {
-        long pid;
-        Instant start;
-        try { pid = Long.parseLong(required(job,"parentPid")); start = Instant.parse(required(job,"parentStartedAt")); }
-        catch (RuntimeException e) { throw new IOException("Invalid recorded parent identity", e); }
-        Optional<ProcessHandle> process = ProcessHandle.of(pid);
-        if (process.isPresent()) {
+    /** Whether the process recorded as (PID, start instant) still runs. */
+    enum Liveness { ALIVE, GONE, UNCERTAIN }
+    /**
+     * Two JVMs can compute start instants for one process that differ slightly: each derives them
+     * from the boot time it sampled when it started, and that moves when the clock is adjusted.
+     */
+    private static final Duration START_TOLERANCE = Duration.ofSeconds(5);
+    /**
+     * A PID that now belongs to a process started at another time is a reused PID: the recorded
+     * process is gone. That happens after every host reboot and must not block anything for good.
+     * This is only a first look. Whether a server is really using the root is decided by its
+     * lifetime root guard, which every caller that would touch the root takes as well.
+     */
+    static Liveness liveness(long pid, Instant recordedStart) {
+        for (int sample = 0; sample < 3; sample++) {
+            Optional<ProcessHandle> process = ProcessHandle.of(pid);
+            if (process.isEmpty()) return Liveness.GONE;
             Optional<Instant> actual = process.get().info().startInstant();
-            if (actual.isEmpty() || !actual.get().equals(start))
-                throw new IOException("Parent PID identity is uncertain or reused. No restore is permitted.");
-            if (process.get().isAlive()) throw new IOException("Recorded server JVM is still alive. No restore is permitted.");
+            if (actual.isPresent()) {
+                if (Duration.between(recordedStart, actual.get()).abs().compareTo(START_TOLERANCE) > 0) return Liveness.GONE;
+                return process.get().isAlive() ? Liveness.ALIVE : Liveness.GONE;
+            }
+            // No start instant: the process may have exited between the two calls. Look again.
+            if (!process.get().isAlive()) return Liveness.GONE;
+            try { Thread.sleep(20); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return Liveness.UNCERTAIN; }
         }
+        return Liveness.UNCERTAIN;
+    }
+    static Liveness parentLiveness(Properties job) throws IOException {
+        try { return liveness(Long.parseLong(required(job,"parentPid")), Instant.parse(required(job,"parentStartedAt"))); }
+        catch (RuntimeException e) { throw new IOException("Invalid recorded parent identity", e); }
+    }
+    static void requireDeadParent(Properties job) throws IOException {
+        switch (parentLiveness(job)) {
+            case GONE -> { }
+            case ALIVE -> throw new IOException("Recorded server JVM is still alive. No restore is permitted.");
+            case UNCERTAIN -> throw new IOException("The recorded server JVM's process cannot be identified. No restore is permitted.");
+        }
+    }
+
+    /**
+     * One channel per lock file for the life of the JVM, never closed: on POSIX, closing any
+     * descriptor of a file drops every lock the process holds on it, including a lock taken through
+     * another channel by another plugin instance in the same JVM.
+     */
+    private static final Map<Path, FileChannel> LOCK_CHANNELS = new ConcurrentHashMap<>();
+    static FileChannel lockChannel(Path file) throws IOException {
+        FileChannel known = LOCK_CHANNELS.get(file);
+        if (known != null && known.isOpen()) return known;
+        FileChannel opened = openLockFile(file);
+        FileChannel raced = LOCK_CHANNELS.putIfAbsent(file, opened);
+        if (raced != null && raced.isOpen()) { retained(opened); return raced; }
+        LOCK_CHANNELS.put(file, opened);
+        return opened;
+    }
+    /** Lock files carry no data, but another local user who could open one could hold a lock on it. */
+    static FileChannel openLockFile(Path file) throws IOException {
+        Set<OpenOption> open = Set.of(StandardOpenOption.CREATE, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+        try {
+            return FileChannel.open(file, open, java.nio.file.attribute.PosixFilePermissions.asFileAttribute(
+                    java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")));
+        } catch (UnsupportedOperationException nonPosix) {
+            return FileChannel.open(file, open);
+        }
+    }
+    private static final List<FileChannel> RETAINED = Collections.synchronizedList(new ArrayList<>());
+    /** Keeps a channel open until the JVM exits instead of closing it. */
+    static void retained(FileChannel channel) { RETAINED.add(channel); }
+
+    /** Identity of whatever is at the path, or an empty string where the filesystem has none (Windows). */
+    static String fileIdentity(Path path) throws IOException {
+        Object key = Files.readAttributes(path, BasicFileAttributes.class, NOFOLLOW).fileKey();
+        return key == null ? "" : key.toString();
+    }
+
+    /** Free space the filesystem of the directory must have beyond the bytes to be written there. */
+    static final long SPACE_MARGIN_BYTES = 64L * 1024 * 1024;
+
+    /** For messages: never the literal text "null". */
+    static String reason(Throwable error) {
+        String message = error.getMessage();
+        return message == null || message.isBlank() ? error.getClass().getSimpleName() : message;
+    }
+
+    /** Removes a directory tree this program created itself. Links are removed, never followed. */
+    static void deleteTree(Path directory) throws IOException {
+        if (!Files.exists(directory, NOFOLLOW)) return;
+        Files.walkFileTree(directory, new SimpleFileVisitor<>() {
+            @Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException { Files.delete(file); return FileVisitResult.CONTINUE; }
+            @Override public FileVisitResult postVisitDirectory(Path dir, IOException error) throws IOException {
+                if (error != null) throw error;
+                Files.delete(dir); return FileVisitResult.CONTINUE;
+            }
+        });
     }
 }

@@ -140,6 +140,8 @@ public final class DeleteWorkflowTest {
                         case "getVersion", "getBukkitVersion" -> "26.2-R0.1-SNAPSHOT";
                         case "getItemFactory" -> itemFactory();
                         case "createInventory" -> inventory((InventoryHolder)a[0],(Integer)a[1]);
+                        case "getPluginManager" -> Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),
+                                new Class<?>[]{org.bukkit.plugin.PluginManager.class},(q,n,b)->defaultValue(n.getReturnType()));
                         default -> defaultValue(m.getReturnType());
                     });
             // JavaPlugin's real constructor is server-loader-only. Allocate a fixture instance and
@@ -147,7 +149,7 @@ public final class DeleteWorkflowTest {
             Class<?> unsafeType=Class.forName("sun.misc.Unsafe");Field uf=unsafeType.getDeclaredField("theUnsafe");uf.setAccessible(true);
             VaultBackupPlugin plugin=(VaultBackupPlugin)unsafeType.getMethod("allocateInstance",Class.class).invoke(uf.get(null),VaultBackupPlugin.class);
             field(plugin,JavaPlugin.class,"server",server);field(plugin,JavaPlugin.class,"isEnabled",true);
-            field(plugin,JavaPlugin.class,"description",new org.bukkit.plugin.PluginDescriptionFile("VaultBackupFixture","1.2.1",VaultBackupPlugin.class.getName()));
+            field(plugin,JavaPlugin.class,"description",new org.bukkit.plugin.PluginDescriptionFile("VaultBackupFixture","9.9.9-fixture",VaultBackupPlugin.class.getName()));
             org.bukkit.plugin.PluginLogger logger=new org.bukkit.plugin.PluginLogger(plugin);logger.setUseParentHandlers(false);
             field(plugin,JavaPlugin.class,"logger",logger);
             field(plugin,VaultBackupPlugin.class,"settings",settings);field(plugin,VaultBackupPlugin.class,"engine",engine);
@@ -163,8 +165,10 @@ public final class DeleteWorkflowTest {
                 if(m.getName().equals("sendMessage")) { for(Object v:a)if(v instanceof String text)messages.add(text);return null; }
                 return defaultValue(m.getReturnType());
             });
-            BackupCommands commands=new BackupCommands(plugin);
             Bukkit.setServer(server);
+            // The Spigot implementation is the one that links against this harness's API class path.
+            field(plugin,VaultBackupPlugin.class,"platform",new SpigotPlatform(plugin));
+            BackupCommands commands=new BackupCommands(new CommandActions(plugin));
             BackupRecord first=engine.createBackup("first"),second=engine.createBackup("second");
             field(plugin,VaultBackupPlugin.class,"catalogue",engine.listBackups());
             commands.onCommand(sender,null,"backup",new String[]{"delete",first.id(),"confirm"});
@@ -181,7 +185,7 @@ public final class DeleteWorkflowTest {
             check(io.queue.size()==1 && contains(messages,"last verified catalogue") && contains(messages,first.id()),"busy list uses cached catalogue");
             commands.onCommand(sender,null,"backup",new String[]{"status"});
             commands.onCommand(sender,null,"backup",new String[]{"help"});
-            check(contains(messages,"Deleting backup") && contains(messages,"VaultBackup Pro 1.2.1 commands"),"status and help stay readable while busy");
+            check(contains(messages,"Deleting backup") && contains(messages,"VaultBackup Pro 9.9.9-fixture commands"),"status and help stay readable while busy");
             io.runOne();drainMain(main);
             check(!busy.get() && !Files.exists(first.zipPath()) && !Files.exists(first.metadataPath()),"direct delete removes exact archive and metadata");
             check(Files.exists(second.zipPath()) && plugin.backups().size()==1,"other target remains intact");
@@ -224,7 +228,7 @@ public final class DeleteWorkflowTest {
             commands.onCommand(sender,null,"backup",new String[]{"restore",recreated.id()});
             check(io.queue.isEmpty() && contains(messages,"reservation already exists"),"plugin refuses a second reserved restore");
             commands.onCommand(sender,null,"backup",new String[]{"status"});commands.onCommand(sender,null,"backup",new String[]{"help"});
-            check(contains(messages,"fixture-job") && contains(messages,"VaultBackup Pro 1.2.1 commands"),"reserved status and help remain accessible");
+            check(contains(messages,"fixture-job") && contains(messages,"VaultBackup Pro 9.9.9-fixture commands"),"reserved status and help remain accessible");
             field(plugin,VaultBackupPlugin.class,"restoreStatus",null);
             check(commands.onTabComplete(sender,null,"backup",new String[]{"delete",recreated.id(),""}).isEmpty(),"no delete confirmation completion");
             check(commands.onTabComplete(sender,null,"backup",new String[]{"restore",recreated.id(),""}).isEmpty(),"no restore confirmation completion");

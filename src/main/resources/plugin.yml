@@ -1,15 +1,23 @@
 name: VaultBackupPro
-version: '1.2.1'
+# Filled in from the Gradle project version when the JAR is built.
+version: '${version}'
 main: com.vaultbackup.plugin.VaultBackupPlugin
+# Oldest server version the plugin loads on. It is built and checked against the current API
+# (26.3) and, because it uses only public API, also runs on newer versions.
 api-version: '26.2'
 author: VaultBackup
 description: 非同期バックアップと手動停止後の安全なオフライン復元
+# Before worlds load: a restore that is still running, or was left unfinished, must be noticed first.
 load: STARTUP
 commands:
+  # Spigot uses this declaration with a CommandExecutor. Paper replaces it with a Brigadier
+  # command of the same name, so the labels here must match PaperCommands.LABELS.
   backup:
     description: VaultBackup Pro の管理
     usage: /backup help
     aliases: [vaultbackup]
+    # Any one of these is enough to see and run the command; each sub-command checks its own.
+    permission: vaultbackup.gui;vaultbackup.create;vaultbackup.list;vaultbackup.restore;vaultbackup.delete;vaultbackup.status;vaultbackup.configure;vaultbackup.reload
 permissions:
   vaultbackup.admin:
     description: VaultBackup 管理者権限
@@ -42,4 +50,5 @@ permissions:
   vaultbackup.reload:
     default: op
   vaultbackup.notify:
+    description: 自動バックアップの失敗などをゲーム内で受け取る
     default: op

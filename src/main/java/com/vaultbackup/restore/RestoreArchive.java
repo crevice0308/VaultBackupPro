@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 package com.vaultbackup.restore;
 
+import com.vaultbackup.core.PortablePaths;
+import com.vaultbackup.core.ZipDirectory;
+
 import java.io.*;
 import java.nio.charset.*;
 import java.nio.file.*;
@@ -30,6 +33,8 @@ public final class RestoreArchive {
             RestoreFiles.directory(destination, false);
             try (var s = Files.list(destination)) { if (s.findAny().isPresent()) throw new IOException("Restore stage must be empty"); }
         }
+        // ZipFile reads the whole central directory into memory as soon as it opens the file.
+        ZipDirectory.requireWithin(archive, MAX_ENTRIES + 1L, MAX_MANIFEST + (MAX_ENTRIES + 1L) * 128L);
         try (ZipFile zip = new ZipFile(archive.toFile(), StandardCharsets.UTF_8)) {
             ZipEntry manifest = zip.getEntry(MANIFEST);
             if (manifest == null || manifest.isDirectory()) throw new IOException("Missing archive manifest");
@@ -54,10 +59,14 @@ public final class RestoreArchive {
                 boolean directory = ze.isDirectory();
                 if (directory) name = name.substring(0, name.length() - 1);
                 validatePath(name);
-                if (!seen.add(name) || !folded.add(java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFC).toLowerCase(Locale.ROOT))) throw new IOException("Duplicate or case-colliding ZIP path: " + name);
+                if (!seen.add(name) || !folded.add(PortablePaths.key(name))) throw new IOException("Duplicate or case-colliding ZIP path: " + name);
                 Entry e = expected.get(name);
                 if (e == null || e.directory() != directory) throw new IOException("Unmanifested or type-mismatched entry: " + name);
-                Path target = destination == null ? null : destination.resolve(name).normalize();
+                Path target;
+                try { target = destination == null ? null : destination.resolve(name).normalize(); }
+                catch (InvalidPathException unrepresentable) {
+                    throw new IOException("A file name in the archive cannot be created with this JVM's file-name encoding. Run the restore with a UTF-8 locale (for example LC_ALL=C.UTF-8)", unrepresentable);
+                }
                 if (target != null && !target.startsWith(destination)) throw new IOException("Unsafe target path");
                 if (directory) { if (ze.getSize()!=0) throw new IOException("Nonempty directory ZIP entry"); if (target != null) Files.createDirectories(target); continue; }
                 if (ze.getSize() != e.size()) throw new IOException("ZIP/manifest size mismatch: " + name);
@@ -97,7 +106,8 @@ public final class RestoreArchive {
         String[] lines = text.split("\n",-1);
         if (!lines[0].equals("VAULTBACKUP-MANIFEST\t1")) throw new IOException("Unsupported manifest format");
         if (lines.length > MAX_ENTRIES + 2) throw new IOException("Manifest has too many records");
-        List<Entry> entries = new ArrayList<>(); Set<String> paths = new HashSet<>(); Map<String,Boolean> types = new HashMap<>(); long total=0;
+        // Refuses duplicates, case/Unicode aliases at any depth and file/directory conflicts, in bounded memory.
+        List<Entry> entries = new ArrayList<>(); PortablePaths names = new PortablePaths(2L * MAX_ENTRIES + 1024); long total=0;
         for (int i=1;i<lines.length;i++) {
             if (i == lines.length-1 && lines[i].isEmpty()) continue;
             if(lines[i].length()>8192) throw new IOException("Manifest record exceeds safety limit");
@@ -108,22 +118,10 @@ public final class RestoreArchive {
                     .decode(java.nio.ByteBuffer.wrap(Base64.getUrlDecoder().decode(f[3]))).toString(); size=Long.parseLong(f[1]); }
             catch (RuntimeException | CharacterCodingException e) { throw new IOException("Invalid manifest encoding",e); }
             validatePath(path); boolean dir=f[0].equals("D");
-            if(!paths.add(java.text.Normalizer.normalize(path, java.text.Normalizer.Form.NFC).toLowerCase(Locale.ROOT))) throw new IOException("Duplicate/case-colliding manifest path");
+            names.add(path,dir);
             if(size<0 || size>MAX_ENTRY || (dir && (size!=0 || !f[2].equals("-"))) || (!dir && !f[2].matches("[0-9a-f]{64}"))) throw new IOException("Invalid manifest size/hash");
             total=Math.addExact(total,size); if(total>MAX_TOTAL) throw new IOException("Archive too large");
-            entries.add(new Entry(path,dir,size,f[2])); types.put(path,dir);
-        }
-        Map<String,String> spellings = new HashMap<>(); Set<String> fileKeys = new HashSet<>(), directoryKeys = new HashSet<>();
-        for(Entry e:entries) {
-            StringBuilder prefix = new StringBuilder(); String[] components=e.path().split("/");
-            for(int i=0;i<components.length;i++) {
-                if(i>0)prefix.append('/'); prefix.append(components[i]); String spelling=prefix.toString();
-                String key=java.text.Normalizer.normalize(spelling,java.text.Normalizer.Form.NFC).toLowerCase(Locale.ROOT);
-                String previous=spellings.putIfAbsent(key,spelling);
-                if(previous!=null && !previous.equals(spelling))throw new IOException("Case/Unicode alias in ancestor path");
-                if(i<components.length-1 || e.directory()) {if(fileKeys.contains(key))throw new IOException("File/directory ancestor conflict");directoryKeys.add(key);}
-                else {if(directoryKeys.contains(key))throw new IOException("File/directory ancestor conflict");fileKeys.add(key);}
-            }
+            entries.add(new Entry(path,dir,size,f[2]));
         }
         return new Verified(entries,total,HexFormat.of().formatHex(RestoreFiles.digest().digest(bytes)));
     }

@@ -42,12 +42,33 @@ public final class PluginSettingsTest {
   }
   var explicit=base();explicit.set("backup.exclude",List.of("logs/**"));
   if(!PluginSettings.from(explicit).excludes().equals(List.of("logs/**")))throw new AssertionError("existing config exclusions changed");checks++;
-  for(String v:List.of("26.2","26.3","26.2-R0.1-SNAPSHOT","26.3-R0.1-SNAPSHOT","26.2.build.133-stable","26.3.build.28-stable","26.2.build.1")) {
-   if(ServerVersions.minecraftVersion(v).isEmpty())throw new AssertionError("supported version rejected "+v);checks++;
+  // The version gate is a minimum, not a list of exact builds: the plugin uses only public API.
+  for(var e:Map.of("26.2","26.2","26.3-R0.1-SNAPSHOT","26.3","26.2.build.133-stable","26.2","26.3.build.253-stable","26.3",
+    "26.3.1-R0.1-SNAPSHOT","26.3.1","26.4-R0.1-SNAPSHOT","26.4","27.1","27.1","1.21.11-R0.1-SNAPSHOT","1.21.11","26.3-rc-3.build.1-alpha","26.3").entrySet()) {
+   if(!BukkitPlatform.minecraftVersion(e.getKey()).equals(e.getValue()))throw new AssertionError("version of "+e.getKey()+" read as "+BukkitPlatform.minecraftVersion(e.getKey()));checks++;
   }
-  for(String v:List.of("26.2.1","26.3.1-R0.1-SNAPSHOT","26.4-R0.1-SNAPSHOT","26.2.build.x-stable","26.2-malicious","1.21.11-R0.1-SNAPSHOT","")) {
-   if(!ServerVersions.minecraftVersion(v).isEmpty())throw new AssertionError("unsupported version accepted "+v);checks++;
+  for(String v:Arrays.asList("","garbage","v26.3","26","26.x-R0.1","26.33333",null)) {
+   if(!BukkitPlatform.minecraftVersion(v).isEmpty())throw new AssertionError("unrecognised version string accepted "+v);checks++;
   }
+  String minimum=VaultBackupPlugin.MINIMUM_MINECRAFT,verified=VaultBackupPlugin.VERIFIED_MINECRAFT;
+  for(String older:List.of("1.21.11","26.1","26.1.2")){if(BukkitPlatform.compareVersions(older,minimum)>=0)throw new AssertionError(older+" must be below the minimum");checks++;}
+  for(String ok:List.of("26.2","26.2.0","26.2.1","26.3","26.4","27.1")){if(BukkitPlatform.compareVersions(ok,minimum)<0)throw new AssertionError(ok+" must satisfy the minimum");checks++;}
+  if(BukkitPlatform.compareVersions("26.3.0",verified)!=0||BukkitPlatform.compareVersions("26.4",verified)<=0||BukkitPlatform.compareVersions("26.10","26.9")<=0)throw new AssertionError("numeric version order");checks++;
+  if(BukkitPlatform.compareVersions(verified,minimum)<0)throw new AssertionError("verified version below minimum");checks++;
+  // plugin.yml must agree with the code: same minimum version, and the command the code registers.
+  var pluginYml=new YamlConfiguration();pluginYml.loadFromString(Files.readString(Path.of(args[1])));
+  if(!minimum.equals(pluginYml.getString("api-version")))throw new AssertionError("api-version differs from MINIMUM_MINECRAFT");checks++;
+  if(!"${version}".equals(pluginYml.getString("version")))throw new AssertionError("plugin.yml version must come from the build");checks++;
+  if(!VaultBackupPlugin.class.getName().equals(pluginYml.getString("main")))throw new AssertionError("plugin.yml main");checks++;
+  if(!"STARTUP".equals(pluginYml.getString("load")))throw new AssertionError("restore guard must start before worlds");checks++;
+  if(pluginYml.contains("folia-supported"))throw new AssertionError("Folia must stay unsupported");checks++;
+  var commandPermission=Arrays.asList(String.valueOf(pluginYml.getString("commands.backup.permission")).split(";"));
+  for(String action:CommandActions.PERMISSIONS){
+   if(!commandPermission.contains("vaultbackup."+action))throw new AssertionError("command permission lacks "+action);checks++;
+   if(!pluginYml.contains("permissions.vaultbackup."+action))throw new AssertionError("undeclared permission "+action);checks++;
+   if(!pluginYml.getBoolean("permissions.vaultbackup.admin.children.vaultbackup."+action))throw new AssertionError("admin lacks child "+action);checks++;
+  }
+  if(commandPermission.size()!=CommandActions.PERMISSIONS.size())throw new AssertionError("unexpected command permission entries");checks++;
   var legacy=base();legacy.set("language",null);if(!PluginSettings.from(legacy).language().equals("ja_JP"))throw new AssertionError("legacy locale");checks++;
   var english=base();english.set("language","en_US");if(!PluginSettings.from(english).language().equals("en_US"))throw new AssertionError("English locale");checks++;
   reject("language","fr_FR");reject("language",false);reject("language","");reject("language","ja");

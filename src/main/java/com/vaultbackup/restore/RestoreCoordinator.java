@@ -18,8 +18,44 @@ public final class RestoreCoordinator {
     public record Status(String jobId, String backupId, String state, String message, Path jobFile, boolean cancellable) {}
     public record CancelResult(String jobId, boolean cancelled, String message) {}
     public enum StartupDisposition { READY, GUARDED_DEGRADED, HARD_CONFLICT }
-    public record StartupResult(StartupDisposition disposition, RestoreCoordinator coordinator, String message) {}
-    private record Pending(Reservation value, Path archive, String manifestSha256) {}
+    /**
+     * @param guardHeldElsewhere true when another process (a restore helper at work, or a second server)
+     *                           holds this root's guard; this server must not run. A hard conflict without
+     *                           it and without a journal is a fault of the configured paths, not a restore in progress.
+     */
+    public record StartupResult(StartupDisposition disposition, RestoreCoordinator coordinator, String message, boolean guardHeldElsewhere) {
+        public StartupResult(StartupDisposition disposition, RestoreCoordinator coordinator, String message) { this(disposition,coordinator,message,false); }
+    }
+    /** What startup found about an earlier restore job, for the administrator. */
+    public enum StartupFinding { NONE, STALE_RESERVATION_CANCELLED, FAILED_RESTORE_ROLLED_BACK }
+    /** The server's layout cannot take an offline restore; told at reservation, not after the server was stopped. */
+    public static final class RestoreUnavailableException extends IOException {
+        private static final long serialVersionUID = 1L;
+        public enum Reason {
+            /** server-root is a mount point (usual on container hosting); a mount point cannot be renamed. */
+            ROOT_IS_MOUNT_POINT,
+            /** The directory that contains server-root does not accept new entries. */
+            PARENT_NOT_WRITABLE,
+            /** The backup is extracted next to server-root first; there is not enough room for that. */
+            INSUFFICIENT_SPACE
+        }
+        private final Reason reason;
+        private final long neededBytes, availableBytes;
+        RestoreUnavailableException(Reason reason,String message,long neededBytes,long availableBytes) {
+            super(message);this.reason=reason;this.neededBytes=neededBytes;this.availableBytes=availableBytes;
+        }
+        public Reason reason(){return reason;}
+        public long neededBytes(){return neededBytes;}
+        public long availableBytes(){return availableBytes;}
+    }
+    /** The archive as it was when verified; an unchanged file need not be hashed again a moment later. */
+    private record Seen(Object fileKey,long size,java.nio.file.attribute.FileTime modified) {
+        static Seen of(Path file)throws IOException {
+            var a=Files.readAttributes(file,java.nio.file.attribute.BasicFileAttributes.class,RestoreFiles.NOFOLLOW);
+            return new Seen(a.fileKey(),a.size(),a.lastModifiedTime());
+        }
+    }
+    private record Pending(Reservation value, Path archive, String manifestSha256, Seen seen) {}
     private final Path root, backups, state, helperJar;
     private String language;
     private final Map<String,Pending> pending = new HashMap<>();
@@ -32,6 +68,9 @@ public final class RestoreCoordinator {
     private final long parentPid;
     private final Instant parentStartedAt;
     private String committedBackupId, startupFailure, ownedJobId;
+    private StartupFinding startupFinding=StartupFinding.NONE;
+    /** Test seam only: replaces the free space reported for the directory that contains server-root. */
+    volatile java.util.function.LongSupplier usableSpaceProbe;
     /** SHA-256 of the helper bundled with the running plugin; null means no expectation was supplied. */
     private String expectedHelperSha256;
     private static final Set<String> SAFE_TERMINAL=Set.of("EXPIRED","FAILED_BEFORE_SWAP");
@@ -44,12 +83,26 @@ public final class RestoreCoordinator {
             RestoreRootLease lease=RestoreRootLease.acquire(serverRoot,stateDirectory);
             coordinator=new RestoreCoordinator(lease,backupDirectory,helperJar,language,logger);
             return coordinator.reconcileStartup();
+        } catch(RestoreRootLease.HeldElsewhereException e) {
+            return new StartupResult(StartupDisposition.HARD_CONFLICT,coordinator,"Restore startup conflict: "+RestoreFiles.reason(e),true);
         } catch(IOException | RuntimeException e) {
             // An acquired lease stays strongly retained by its shutdown hook, even
             // when construction or journal validation fails and no instance returns.
             return new StartupResult(StartupDisposition.HARD_CONFLICT,coordinator,
-                    "Restore startup conflict: "+e.getMessage());
+                    "Restore startup conflict: "+RestoreFiles.reason(e));
         }
+    }
+    /**
+     * Best-effort look at whether a restore journal exists in a state directory, for deciding how
+     * to treat a startup conflict. True also when that cannot be determined.
+     */
+    public static boolean journalMayExist(Path stateDirectory) {
+        try {
+            Path state=stateDirectory.toAbsolutePath().normalize();
+            if(!Files.exists(state,RestoreFiles.NOFOLLOW))return false;
+            if(!Files.isDirectory(state,RestoreFiles.NOFOLLOW) || !Files.isReadable(state))return true;
+            return Files.exists(state.resolve("active-restore.properties"),RestoreFiles.NOFOLLOW);
+        } catch(RuntimeException unknown) {return true;}
     }
     public RestoreCoordinator(Path serverRoot, Path backupDirectory, Path stateDirectory, Path helperJar)throws IOException {
         this(serverRoot,backupDirectory,stateDirectory,helperJar,"en");
@@ -100,7 +153,8 @@ public final class RestoreCoordinator {
                     verifiedReceipt(id,dir,job);
                     return startup(StartupDisposition.READY,"");
                 }
-                if(Files.exists(dir.resolve("recovery-receipt.properties"),RestoreFiles.NOFOLLOW)) {
+                boolean rolledBack=Files.exists(dir.resolve("recovery-receipt.properties"),RestoreFiles.NOFOLLOW);
+                if(rolledBack) {
                     // The authenticated receipt is emitted only after the helper
                     // physically returns the preserved original tree to root.
                     // It also handles a failure writing the final human-readable status.
@@ -108,36 +162,34 @@ public final class RestoreCoordinator {
                 } else requirePreSwap(dir,job,current);
                 // Only after positively establishing a pre-swap/restored root may failure
                 // to persist/acknowledge a cancellation become degraded startup.
+                startupFinding=rolledBack?StartupFinding.FAILED_RESTORE_ROLLED_BACK:StartupFinding.STALE_RESERVATION_CANCELLED;
+                startupFailure=rolledBack?"Restore "+id+" failed after the swap had begun; the helper put the original server data back. The failed data is kept beside server-root."
+                        :"Stale restore "+id+" was cancelled; the current server data was kept.";
                 try {
                     RestoreJobState.requestCancellation(dir,job);
-                    if(finishStartupCancellation(id,dir,job)) {
-                        startupFailure="Stale restore "+id+" was cancelled; the current server data was kept.";
-                        return startup(StartupDisposition.READY,startupFailure);
-                    }
+                    if(finishStartupCancellation(id,dir,job))return startup(StartupDisposition.READY,startupFailure);
                 } catch(IOException | RuntimeException e) {
                     return startup(StartupDisposition.GUARDED_DEGRADED,
-                            "Stale restore "+id+" is blocked by this JVM's root guard, but cancellation is unresolved: "+e.getMessage());
+                            "Stale restore "+id+" is blocked by this JVM's root guard, but cancellation is unresolved: "+RestoreFiles.reason(e));
                 }
             }
             // Give a live old helper an opportunity to authenticate the durable
             // tombstone. Do not invent process ownership or a NOT_LAUNCHED ack.
-            long deadline=System.nanoTime()+Duration.ofSeconds(2).toNanos();
+            // After a plugin reload the helper is still polling (every 200 ms) for this JVM's exit.
+            long deadline=System.nanoTime()+Duration.ofSeconds(5).toNanos();
             do {
                 try(RestoreJobState.Gate gate=RestoreJobState.lock(dir,Duration.ofMillis(100))) {
-                    if(gate!=null && finishStartupCancellation(id,dir,job)) {
-                        startupFailure="Stale restore "+id+" was cancelled; the current server data was kept.";
-                        return startup(StartupDisposition.READY,startupFailure);
-                    }
+                    if(gate!=null && finishStartupCancellation(id,dir,job))return startup(StartupDisposition.READY,startupFailure);
                 } catch(IOException | RuntimeException e) {
                     return startup(StartupDisposition.GUARDED_DEGRADED,
-                            "Stale restore "+id+" is safely guarded, but cancellation acknowledgment failed: "+e.getMessage());
+                            "Stale restore "+id+" is safely guarded, but cancellation acknowledgment failed: "+RestoreFiles.reason(e));
                 }
                 try {Thread.sleep(50);}catch(InterruptedException e){Thread.currentThread().interrupt();break;}
             } while(System.nanoTime()<deadline);
             return startup(StartupDisposition.GUARDED_DEGRADED,
                     "Stale restore "+id+" is safely guarded. Cancellation is pending; backup mutations stay disabled until the journal is resolved.");
         } catch(IOException | RuntimeException e) {
-            return startup(StartupDisposition.HARD_CONFLICT,"Restore startup conflict: "+e.getMessage());
+            return startup(StartupDisposition.HARD_CONFLICT,"Restore startup conflict: "+RestoreFiles.reason(e));
         }
     }
     private void requirePreSwap(Path dir,Properties job,String current)throws IOException {
@@ -148,7 +200,16 @@ public final class RestoreCoordinator {
         // Unexpected siblings/receipts are preserved for stopped-server inspection.
         for(String kind:List.of("rollback","failed")) {
             Path path=boundSibling(job,kind);
-            if(Files.exists(path,RestoreFiles.NOFOLLOW))throw new IOException("Ambiguous pre-swap journal: "+kind+" tree exists at "+path);
+            if(!Files.exists(path,RestoreFiles.NOFOLLOW))continue;
+            // The helper recorded which directory is the original root before it would have moved
+            // anything. With that directory still in place, whatever sits at this path was not put
+            // there by a swap of this job, and anybody able to create it must not thereby be able to
+            // keep the server from starting.
+            if(RestoreJobState.isOriginalRoot(dir,job,root)==RestoreJobState.Original.YES) {
+                logger.accept("[restore] A directory that restore job "+RestoreFiles.required(job,"jobId")+" did not create exists at "+path+". It was left untouched; the server root is the recorded original.");
+                continue;
+            }
+            throw new IOException("Ambiguous pre-swap journal: "+kind+" tree exists at "+path);
         }
         Path stage=boundSibling(job,"stage");
         if(Files.exists(stage,RestoreFiles.NOFOLLOW)) {
@@ -179,9 +240,31 @@ public final class RestoreCoordinator {
         Path file=archive.toAbsolutePath().normalize();RestoreFiles.regular(file);
         if(!file.startsWith(backups) || file.equals(backups))throw new IOException("Archive is outside the configured backup directory");
         synchronized(this){ensureNoCommitted();}
+        Seen seen=Seen.of(file);
         RestoreArchive.Verified verified=RestoreArchive.verify(file,expectedSha256);
+        requireRestorableLayout(verified.totalBytes());
         Reservation value=new Reservation(RestoreFiles.randomSecret().substring(0,24),backupId,expectedSha256,verified.entries().size(),verified.totalBytes(),Instant.now().plus(ttl));
-        synchronized(this){ensureNoCommitted();pending.clear();pending.put(value.token(),new Pending(value,file,verified.manifestSha256()));}return value;
+        synchronized(this){ensureNoCommitted();pending.clear();pending.put(value.token(),new Pending(value,file,verified.manifestSha256(),seen));}return value;
+    }
+    /**
+     * The helper extracts the backup into a directory beside server-root and then renames both.
+     * Where that cannot work, the administrator learns it now, while the server is still running,
+     * instead of from a refused restore after the stop.
+     */
+    private void requireRestorableLayout(long totalBytes)throws IOException {
+        Path parent=root.getParent();
+        if(!Files.getFileStore(root).equals(Files.getFileStore(parent)))
+            throw new RestoreUnavailableException(RestoreUnavailableException.Reason.ROOT_IS_MOUNT_POINT,
+                    "server-root is a mount point and cannot be replaced by an offline restore: "+root,0,0);
+        if(!Files.isWritable(parent))
+            throw new RestoreUnavailableException(RestoreUnavailableException.Reason.PARENT_NOT_WRITABLE,
+                    "The directory containing server-root is not writable, so a restore could not be staged or swapped: "+parent,0,0);
+        long needed=totalBytes>Long.MAX_VALUE-RestoreFiles.SPACE_MARGIN_BYTES?Long.MAX_VALUE:totalBytes+RestoreFiles.SPACE_MARGIN_BYTES;
+        java.util.function.LongSupplier probe=usableSpaceProbe;
+        long available=probe!=null?probe.getAsLong():Files.getFileStore(parent).getUsableSpace();
+        if(available<needed)
+            throw new RestoreUnavailableException(RestoreUnavailableException.Reason.INSUFFICIENT_SPACE,
+                    "Not enough free space beside server-root to extract the backup: "+needed+" bytes needed, "+available+" available",needed,available);
     }
     /**
      * The helper runs with the server's OS account and replaces server-root, so it must be
@@ -195,6 +278,7 @@ public final class RestoreCoordinator {
         ensureNoCommitted();language=value!=null && value.toLowerCase(Locale.ROOT).startsWith("ja")?"ja":"en";
     }
     public Optional<String> startupFailure(){return Optional.ofNullable(startupFailure);}
+    public StartupFinding startupFinding(){return startupFinding;}
     public synchronized boolean cancel(String token){return pending.remove(token)!=null;}
     public synchronized Set<String> protectedBackupIds(){
         Set<String> ids=new HashSet<>();for(Pending p:pending.values())if(p.value.expiresAt().isAfter(Instant.now()))ids.add(p.value.backupId());
@@ -209,7 +293,10 @@ public final class RestoreCoordinator {
         if(confirmedTokens.containsKey(token))return launchResult(confirmedTokens.get(token));
         ensureNoCommitted();Pending p=pending.remove(token);
         if(p==null || !p.value.expiresAt().isAfter(Instant.now()))throw new IOException("Restore confirmation is missing, used, or expired");
-        if(!RestoreFiles.sha(p.archive).equals(p.value.archiveSha256()))throw new IOException("Backup changed after preview");
+        // The helper verifies every byte again before it applies anything. Here only a file that is
+        // no longer the one just verified needs hashing; that also keeps this monitor, which a
+        // server shutdown waits for, from being held for the time it takes to read a large archive.
+        if(!p.seen.equals(Seen.of(p.archive)) && !RestoreFiles.sha(p.archive).equals(p.value.archiveSha256()))throw new IOException("Backup changed after preview");
         RestoreFiles.directory(state.resolve("restore-jobs"),true);
         String id=UUID.randomUUID().toString();Path dir=jobDirectory(id);RestoreFiles.createPrivateDirectory(dir);Properties job=new Properties();
         job.setProperty("formatVersion","2");job.setProperty("jobId",id);job.setProperty("backupId",p.value.backupId());job.setProperty("language",language);
@@ -223,7 +310,7 @@ public final class RestoreCoordinator {
         Properties active=new Properties();active.setProperty("jobId",id);active.setProperty("backupId",p.value.backupId());
         // Pin before an atomic publication whose subsequent directory fsync may still fail.
         committedBackupId=p.value.backupId();ownedJobId=id;confirmedTokens.put(token,id);pending.clear();
-        try{RestoreFiles.write(activeFile(),active);}catch(IOException e){return failedHandshake(id,null,"Could not publish restore reservation: "+e.getMessage());}
+        try{RestoreFiles.write(activeFile(),active);}catch(IOException e){return failedHandshake(id,null,"Could not publish restore reservation: "+RestoreFiles.reason(e));}
         Process process=null;
         try {
             RestoreFiles.regular(helperJar);
@@ -232,8 +319,13 @@ public final class RestoreCoordinator {
             String executable=System.getProperty("os.name","").toLowerCase(Locale.ROOT).contains("win")?"java.exe":"java";
             Path java=Path.of(System.getProperty("java.home"),"bin",executable);
             try(RestoreJobState.Gate gate=RestoreJobState.requireLock(dir)) {
-                process=new ProcessBuilder(java.toString(),"-jar",helperJar.toString(),"--job",dir.resolve("job.properties").toString())
-                        .directory(state.toFile()).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.appendTo(dir.resolve("helper.log").toFile())).start();
+                ProcessBuilder builder=new ProcessBuilder(java.toString(),"-jar",helperJar.toString(),"--job",dir.resolve("job.properties").toString())
+                        .directory(state.toFile()).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.appendTo(dir.resolve("helper.log").toFile()));
+                // Archive names are UTF-8. A helper that inherited a non-UTF-8 locale from this server
+                // could not create files with non-ASCII names. Where the locale does not exist, nothing changes.
+                if(!"UTF-8".equalsIgnoreCase(System.getProperty("sun.jnu.encoding","")) && !System.getProperty("os.name","").toLowerCase(Locale.ROOT).contains("win"))
+                    builder.environment().put("LC_ALL","C.UTF-8");
+                process=builder.start();
                 processes.put(id,process);RestoreJobState.recordProcess(dir,job,process.toHandle());
             }
             long deadline=System.nanoTime()+Duration.ofSeconds(15).toNanos();
@@ -243,7 +335,7 @@ public final class RestoreCoordinator {
                 try{Thread.sleep(50);}catch(InterruptedException e){Thread.currentThread().interrupt();break;}
             }
             return failedHandshake(id,process,"Helper did not acknowledge readiness");
-        }catch(IOException | RuntimeException e){return failedHandshake(id,process,e.getMessage());}
+        }catch(IOException | RuntimeException e){return failedHandshake(id,process,RestoreFiles.reason(e));}
     }
     private LaunchResult launchResult(String id)throws IOException {
         Path dir=jobDirectory(id);String current=RestoreFiles.status(dir);
@@ -286,14 +378,18 @@ public final class RestoreCoordinator {
             return Optional.of(new Status(id,RestoreFiles.required(a,"backupId"),"CANCEL_PENDING","Cancellation requested; waiting for verified acknowledgment. Keep the server running.",dir.resolve("job.properties"),true));
         }
         if(SAFE_TERMINAL.contains(current) && confirmedDead(id,dir,job)) {
+            String why=RestoreFiles.load(dir.resolve("status.properties")).getProperty("message","");
             try(RestoreJobState.Gate gate=RestoreJobState.requireLock(dir)) {
-                RestoreJobState.requestCancellation(dir,job);RestoreJobState.acknowledgeCancellation(dir,job,"CONFIRMED_HELPER_DEATH");clearActive(id);return Optional.empty();
+                RestoreJobState.requestCancellation(dir,job);RestoreJobState.acknowledgeCancellation(dir,job,"CONFIRMED_HELPER_DEATH");clearActive(id);
             }
+            // Otherwise the reservation would simply disappear from the administrator's view.
+            logger.accept("[restore] "+current+": restore job "+id+" ended without changing anything and its reservation was cleared. "+why);
+            return Optional.empty();
         }
         if(RestoreJobState.waiting(current)) {
             try {
                 if(confirmedDead(id,dir,job))return Optional.of(new Status(id,RestoreFiles.required(a,"backupId"),"HELPER_EXITED","The helper exited while waiting. No restore will run; cancel this reservation before stopping and then reserve again.",dir.resolve("job.properties"),Objects.equals(ownedJobId,id)));
-            }catch(IOException e){return Optional.of(new Status(id,RestoreFiles.required(a,"backupId"),"HELPER_UNCERTAIN","Helper identity is uncertain. Keep the server running and resolve/cancel this reservation: "+e.getMessage(),dir.resolve("job.properties"),Objects.equals(ownedJobId,id)));}
+            }catch(IOException e){return Optional.of(new Status(id,RestoreFiles.required(a,"backupId"),"HELPER_UNCERTAIN","Helper identity is uncertain. Keep the server running and resolve/cancel this reservation: "+RestoreFiles.reason(e),dir.resolve("job.properties"),Objects.equals(ownedJobId,id)));}
         }
         Properties status=RestoreFiles.load(dir.resolve("status.properties"));
         return Optional.of(new Status(id,RestoreFiles.required(a,"backupId"),current,status.getProperty("message",""),dir.resolve("job.properties"),Objects.equals(ownedJobId,id) && RestoreJobState.waiting(current)));
@@ -346,17 +442,32 @@ public final class RestoreCoordinator {
     public synchronized void abortLaunch(String id)throws IOException {
         CancelResult result=cancelCommitted(id);if(!result.cancelled())throw new IOException(result.message());
     }
-    /** Called only when the platform proves its server shutdown path was entered; no world writes or lock release. */
+    /** What the server platform could establish when the plugin was disabled. */
+    public enum ShutdownEvidence {
+        /** The server API reported that its shutdown path was entered. */
+        SERVER_STOPPING,
+        /** No shutdown indicator exists on this server; the helper additionally requires a prompt JVM exit. */
+        PLUGIN_DISABLED
+    }
+    /** Compatibility form for callers that have proven the server shutdown path was entered. */
     public synchronized void noteNormalShutdown()throws IOException {
+        noteNormalShutdown(ShutdownEvidence.SERVER_STOPPING);
+    }
+    /** Records authenticated stop intent for this JVM's own waiting reservation; no world writes or lock release. */
+    public synchronized void noteNormalShutdown(ShutdownEvidence evidence)throws IOException {
+        Objects.requireNonNull(evidence,"evidence");
         if(ownedJobId==null || !Files.exists(activeFile(),RestoreFiles.NOFOLLOW))return;
         Path dir=jobDirectory(ownedJobId);Properties job=RestoreFiles.load(dir.resolve("job.properties"));
         try(RestoreJobState.Gate gate=RestoreJobState.requireLock(dir)) {
             RestoreJobState.requireActive(state,job);
             if(RestoreJobState.hasCancellation(dir))return;
             if(!RestoreJobState.waiting(RestoreFiles.status(dir)))return;
-            RestoreJobState.noteNormalShutdown(dir,job);
+            RestoreJobState.noteNormalShutdown(dir,job,evidence==ShutdownEvidence.SERVER_STOPPING
+                    ?RestoreJobState.EVIDENCE_SERVER_STOPPING:RestoreJobState.EVIDENCE_PLUGIN_DISABLED);
         }
     }
+    /** True when this coordinator reuses a root guard acquired by an earlier plugin instance of this JVM (plugin reload). */
+    public boolean inheritedRootGuard(){return lifetimeLease.inherited;}
     public synchronized Optional<Receipt> consumeVerifiedReceipt()throws IOException {
         if(startupDisposition!=StartupDisposition.READY)throw new IOException(startupDiagnostic);
         if(!Files.exists(activeFile(),RestoreFiles.NOFOLLOW))return Optional.empty();
@@ -372,7 +483,10 @@ public final class RestoreCoordinator {
         for(String key:List.of("jobId","backupId","serverRoot","archiveSha256","manifestSha256"))if(!RestoreFiles.required(job,key).equals(RestoreFiles.required(receipt,key)))throw new IOException("Receipt does not match committed job: "+key);
         if(!root.toString().equals(RestoreFiles.required(receipt,"serverRoot")))throw new IOException("Receipt is for another server");
         if(!RestoreFiles.constantEquals(RestoreFiles.required(receipt,"authentication"),RestoreFiles.hmac(RestoreFiles.required(job,"nonce"),RestoreFiles.receiptPayload(receipt))))throw new IOException("Receipt authentication failed");
-        Path rollback=Path.of(RestoreFiles.required(receipt,"rollbackDirectory"));if(!rollback.toString().equals(RestoreFiles.required(job,"rollback")))throw new IOException("Receipt rollback path mismatch");RestoreFiles.directory(rollback,false);
+        Path rollback=Path.of(RestoreFiles.required(receipt,"rollbackDirectory"));if(!rollback.toString().equals(RestoreFiles.required(job,"rollback")))throw new IOException("Receipt rollback path mismatch");
+        // The preserved original is the administrator's to delete once the restore is confirmed. Its
+        // absence takes nothing away from the authenticated receipt; only a symlink there is refused.
+        if(Files.exists(rollback,RestoreFiles.NOFOLLOW))RestoreFiles.directory(rollback,false);
         try{return new Receipt(id,RestoreFiles.required(receipt,"backupId"),Instant.parse(RestoreFiles.required(receipt,"completedAt")),rollback);}catch(RuntimeException e){throw new IOException("Invalid receipt timestamp",e);}
     }
     private void validateBoundJob(Properties job,String id)throws IOException {

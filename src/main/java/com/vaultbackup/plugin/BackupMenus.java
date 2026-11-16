@@ -2,7 +2,6 @@
 package com.vaultbackup.plugin;
 
 import com.vaultbackup.core.BackupRecord;
-import org.bukkit.ChatColor;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
@@ -15,13 +14,16 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.meta.ItemMeta;
 
 import java.nio.file.Files;
 import java.util.*;
 import java.util.function.Consumer;
 
-/** Server-owned holders and action maps; no authorization or target IDs come from item display text. */
+/**
+ * Server-owned holders and action maps; no authorization or target IDs come from item display text.
+ * Inventories and items are created by the platform, so titles and names use the text API each
+ * server recommends (components on Paper, ChatColor strings on Spigot).
+ */
 final class BackupMenus implements Listener {
     private final VaultBackupPlugin plugin;
     private final Map<UUID, Menu> open = new HashMap<>();
@@ -35,7 +37,11 @@ final class BackupMenus implements Listener {
         }
         return true;
     }
-    private Menu make(Player p, String title, int size) { return new Menu(p.getUniqueId(),title,size); }
+    private Menu make(Player p, String title, int size) { return new Menu(plugin.platform(),p.getUniqueId(),title,size); }
+    /** The menu shown in the top inventory, or null when it is not one of ours. */
+    private Menu menu(Inventory inventory) {
+        return inventory != null && plugin.platform().holderOf(inventory) instanceof Menu m ? m : null;
+    }
     private void show(Player p, Menu menu) {
         if (!access(p) || !p.isOnline()) return;
         p.openInventory(menu.inventory); open.put(p.getUniqueId(),menu);
@@ -44,7 +50,7 @@ final class BackupMenus implements Listener {
         if (!access(p)) return;
         Menu m = make(p,t("menu.main"),27);
         m.put(10,Material.EMERALD_BLOCK,t("menu.create"),List.of(t("menu.create.save"),t("menu.create.async")),"create",who -> { who.closeInventory(); plugin.create(who,"manual"); });
-        m.put(12,Material.CHEST,t("menu.catalogue"),List.of(t("menu.catalogue.count",plugin.backups().size()),t("menu.catalogue.click")),"list",who -> plugin.refresh(who,() -> openList(who,0)));
+        m.put(12,Material.CHEST,t("menu.catalogue"),List.of(t("menu.catalogue.count",plugin.backups().size()),t("menu.catalogue.click")),"list",who -> plugin.refresh(who,false,() -> openList(who,0)));
         m.put(14,Material.CLOCK,t("menu.auto"),List.of(t("common.automatic",on(plugin.settings().automatic())),t("common.interval",plugin.settings().intervalMinutes())),"configure",this::openAutomatic);
         m.put(16,Material.COMPARATOR,t("menu.settings"),List.of(t("menu.settings.details"),t("menu.settings.validate")),"configure",this::openSettings);
         m.put(22,Material.PAPER,t("menu.status"),List.of(plugin.operation(),plugin.progress(),t("common.free",VaultBackupPlugin.humanBytes(plugin.freeSpace()))),"status",who -> { plugin.status(who); openStorage(who); });
@@ -61,13 +67,16 @@ final class BackupMenus implements Listener {
         int start = current*45;
         for (int i=start; i<Math.min(start+45,records.size()); i++) {
             BackupRecord record = records.get(i);
-            m.put(i-start,Material.ENDER_CHEST,record.id(),List.of(t("common.created",record.createdAt()),t("common.label",record.label()),
-                    t("common.archive",VaultBackupPlugin.humanBytes(record.compressedBytes())),t("common.entries",record.entryCount()),t("menu.details")),"list",who -> openInfo(who,record.id(),current));
+            List<String> lore = new ArrayList<>(List.of(t("common.created",record.createdAt()),t("common.label",record.label()),
+                    t("common.archive",VaultBackupPlugin.humanBytes(record.compressedBytes())),t("common.entries",record.entryCount())));
+            if (record.unstableEntries() > 0) lore.add(t("list.unstable",record.unstableEntries()));
+            lore.add(t("menu.details"));
+            m.put(i-start,Material.ENDER_CHEST,record.id(),lore,"list",who -> openInfo(who,record.id(),current));
         }
         if (records.isEmpty()) m.display(22,Material.BARRIER,t("menu.empty"),List.of(t("menu.empty.hint")));
         if (current>0) m.put(45,Material.ARROW,t("menu.previous"),List.of(),"list",who -> openList(who,current-1));
         m.put(48,Material.COMPASS,t("common.dashboard"),List.of(),"gui",this::openMain);
-        m.put(49,Material.SPYGLASS,t("menu.refresh"),List.of(t("menu.refresh.hint")),"list",who -> plugin.refresh(who,() -> openList(who,current)));
+        m.put(49,Material.SPYGLASS,t("menu.refresh"),List.of(t("menu.refresh.hint")),"list",who -> plugin.refresh(who,true,() -> openList(who,current)));
         if (current+1<pages) m.put(53,Material.ARROW,t("menu.next"),List.of(),"list",who -> openList(who,current+1));
         show(p,m);
     }
@@ -77,7 +86,8 @@ final class BackupMenus implements Listener {
         Menu m = make(p,t("menu.info"),27);
         m.display(4,Material.WRITABLE_BOOK,id,List.of(t("common.created",record.createdAt()),t("common.label",record.label()),
                 t("common.archive",VaultBackupPlugin.humanBytes(record.compressedBytes())),t("common.original",VaultBackupPlugin.humanBytes(record.totalBytes())),
-                t("common.entries",record.entryCount()),"SHA-256: "+record.sha256().substring(0,16)+"…"));
+                t("common.entries",record.entryCount()),"SHA-256: "+record.sha256().substring(0,16)+"…",
+                record.unstableEntries() > 0 ? t("list.unstable",record.unstableEntries()) : t("list.stable")));
         m.put(11,Material.LIME_CONCRETE,t("menu.restore"),List.of(t("menu.selected",id),t("menu.restore.direct"),t("menu.restore.manual"),t("menu.noautorestart"),t("menu.restore.rollback"),t("menu.excluded"),t("menu.restore.cancelhint")),"restore",who -> { who.closeInventory(); plugin.requestRestore(who,id); });
         m.put(15,Material.RED_CONCRETE,t("menu.delete"),List.of(t("menu.selected",id),t("menu.delete.direct"),t("menu.delete.files"),t("menu.delete.permanent"),t("menu.delete.pinned")),"delete",who -> { who.closeInventory(); plugin.delete(who,id); });
         m.put(22,Material.ARROW,t("menu.back"),List.of(),"list",who -> openList(who,page));
@@ -124,15 +134,14 @@ final class BackupMenus implements Listener {
     }
 
     @EventHandler public void click(InventoryClickEvent event) {
-        if (!(event.getView().getTopInventory().getHolder() instanceof Menu m)) return;
+        Menu m = menu(event.getView().getTopInventory());
+        if (m == null) return;
         event.setCancelled(true); // Covers bottom inventory, shift, number-key, swap, drop and collect-to-cursor.
         if (!(event.getWhoClicked() instanceof Player player)) return;
         if (!m.owner.equals(player.getUniqueId()) || open.get(player.getUniqueId()) != m || !access(player)) {
             // Bukkit forbids closeInventory() inside InventoryClickEvent; close a stale menu next tick.
             Bukkit.getScheduler().runTask(plugin,() -> {
-                var view = player.getOpenInventory();
-                if (player.isOnline() && view != null && view.getTopInventory() != null
-                        && view.getTopInventory().getHolder() == m) player.closeInventory();
+                if (player.isOnline() && menu(player.getOpenInventory().getTopInventory()) == m) player.closeInventory();
             });
             return;
         }
@@ -148,37 +157,32 @@ final class BackupMenus implements Listener {
         });
     }
     @EventHandler public void drag(InventoryDragEvent event) {
-        if (event.getView().getTopInventory().getHolder() instanceof Menu) event.setCancelled(true);
+        if (menu(event.getView().getTopInventory()) != null) event.setCancelled(true);
     }
     @EventHandler public void close(InventoryCloseEvent event) {
-        if (event.getInventory().getHolder() instanceof Menu m) open.remove(event.getPlayer().getUniqueId(),m);
+        Menu m = menu(event.getInventory());
+        if (m != null) open.remove(event.getPlayer().getUniqueId(),m);
     }
     @EventHandler public void quit(PlayerQuitEvent event) { open.remove(event.getPlayer().getUniqueId()); }
     void closeAll() {
-        for (Player p:Bukkit.getOnlinePlayers()) if (p.getOpenInventory().getTopInventory().getHolder() instanceof Menu) p.closeInventory();
+        for (Player p:Bukkit.getOnlinePlayers()) if (menu(p.getOpenInventory().getTopInventory()) != null) p.closeInventory();
         open.clear();
     }
     private record Action(String permission, Consumer<Player> callback) {}
     private static final class Menu implements InventoryHolder {
+        final ServerPlatform platform;
         final UUID owner;
         final Inventory inventory;
         final Map<Integer,Action> actions=new HashMap<>();
-        Menu(UUID owner,String title,int size) {
-            this.owner=owner; inventory=Bukkit.createInventory(this,size,ChatColor.DARK_AQUA+title);
-            ItemStack filler=item(Material.GRAY_STAINED_GLASS_PANE," ",List.of());
+        Menu(ServerPlatform platform,UUID owner,String title,int size) {
+            this.platform=platform; this.owner=owner; inventory=platform.createMenu(this,size,title);
+            ItemStack filler=platform.icon(Material.GRAY_STAINED_GLASS_PANE," ",List.of());
             for (int slot=0;slot<size;slot++) inventory.setItem(slot,filler);
         }
         @Override public Inventory getInventory() { return inventory; }
         void put(int slot,Material type,String title,List<String> lore,String permission,Consumer<Player> callback) {
             display(slot,type,title,lore); actions.put(slot,new Action(permission,callback));
         }
-        void display(int slot,Material type,String title,List<String> lore) { inventory.setItem(slot,item(type,title,lore)); }
-        private static ItemStack item(Material type,String title,List<String> lore) {
-            ItemStack stack=new ItemStack(type);
-            ItemMeta meta=stack.getItemMeta();
-            meta.setDisplayName(ChatColor.RESET.toString()+ChatColor.GOLD+title);
-            meta.setLore(lore.stream().map(line -> ChatColor.RESET.toString()+ChatColor.GRAY+line).toList());
-            stack.setItemMeta(meta); return stack;
-        }
+        void display(int slot,Material type,String title,List<String> lore) { inventory.setItem(slot,platform.icon(type,title,lore)); }
     }
 }

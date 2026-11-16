@@ -15,14 +15,28 @@ import java.nio.file.StandardOpenOption;
  * A root lease belongs to the JVM, not to a plugin instance. There is deliberately
  * no close method: disabling, failed startup, and garbage collection must not
  * allow a waiting helper to replace a root that this JVM may still be using.
+ *
+ * A plugin reload creates a second plugin instance in the same JVM. The first
+ * instance's lease is still in force (it is never released), so the second
+ * instance inherits it instead of treating its own JVM as a competing server.
  */
 final class RestoreRootLease {
+    /** Another process holds the guard: a helper replacing this root right now, or a second server on it. */
+    static final class HeldElsewhereException extends IOException {
+        private static final long serialVersionUID = 1L;
+        HeldElsewhereException(String message) { super(message); }
+    }
+    /** JVM-wide marker (system properties outlive plugin class loaders) naming the guards this JVM holds. */
+    private static final String HELD_PROPERTY_PREFIX = "com.vaultbackup.rootguard.";
     final Path root, state;
+    /** True when an earlier plugin instance of this JVM acquired the guard and this instance reuses it. */
+    final boolean inherited;
     private final FileChannel channel;
+    /** Null for an inherited lease: the lock object belongs to the earlier instance's retained channel. */
     private final FileLock lock;
 
     private RestoreRootLease(Path root, Path state, FileChannel channel, FileLock lock) {
-        this.root=root;this.state=state;this.channel=channel;this.lock=lock;
+        this.root=root;this.state=state;this.channel=channel;this.lock=lock;this.inherited=lock==null;
     }
 
     static RestoreRootLease acquire(Path serverRoot, Path stateDirectory)throws IOException {
@@ -36,8 +50,9 @@ final class RestoreRootLease {
         RestoreFiles.external(root,state,"State directory");
         state=RestoreFiles.directory(state,true);
         root=guardIdentity(root,state);
-        FileChannel channel=FileChannel.open(state.resolve(RestoreFiles.guardName(root)),
-                StandardOpenOption.CREATE,StandardOpenOption.WRITE,LinkOption.NOFOLLOW_LINKS);
+        Path guard=state.resolve(RestoreFiles.guardName(root));
+        String heldProperty=HELD_PROPERTY_PREFIX+guard;
+        FileChannel channel=RestoreFiles.openLockFile(guard);
         FileLock lock;
         try {lock=channel.tryLock();}
         catch(OverlappingFileLockException e) {
@@ -45,15 +60,23 @@ final class RestoreRootLease {
             // release this JVM's original OS lock. Keep the collision channel
             // open too, including across plugin class-loader reloads.
             retainChannelUntilExit(channel);
-            throw new IOException("Server root already has a lifetime restore guard; JVM restart required after plugin reload",e);
+            // Only a lease this JVM recorded itself may be inherited. Any other
+            // overlapping lock in this JVM is an unknown holder: fail closed.
+            if(!"held".equals(System.getProperty(heldProperty)))
+                throw new IOException("Server root guard is locked by an unknown holder inside this JVM. Restart the JVM.",e);
+            RestoreRootLease lease=new RestoreRootLease(root,state,channel,null);
+            Runtime.getRuntime().addShutdownHook(new Thread(lease::retainUntilProcessExit,"VaultBackupPro-inherited-guard"));
+            return lease;
         } catch(IOException | RuntimeException e) {channel.close();throw e;}
         if(lock==null) {
-            channel.close();throw new IOException("Offline restore or another server holds the root guard. Do not start this server.");
+            channel.close();throw new HeldElsewhereException("Offline restore or another server holds the root guard. Do not start this server.");
         }
         RestoreRootLease lease=new RestoreRootLease(root,state,channel,lock);
         // Runtime holds this hook strongly even if every plugin/coordinator
         // reference is discarded. The hook itself NEVER releases the lease.
         Runtime.getRuntime().addShutdownHook(new Thread(lease::retainUntilProcessExit,"VaultBackupPro-lifetime-guard"));
+        // Recorded only after the lock and its retaining hook exist; never cleared.
+        System.setProperty(heldProperty,"held");
         return lease;
     }
 
@@ -91,6 +114,6 @@ final class RestoreRootLease {
     }
 
     private void retainUntilProcessExit() {
-        if(channel.isOpen() && lock.isValid()) { /* OS process teardown releases the lease. */ }
+        if(channel.isOpen() && (lock==null || lock.isValid())) { /* OS process teardown releases the lease. */ }
     }
 }

@@ -1,5 +1,4 @@
 VaultBackup Pro
-Version: 1.2.1
-Revision: SecurityAndReliabilityFixes
+Version: ${version}
 License: GPL-3.0-only
-Default artifacts: obfuscated
+Artifacts: plain (not obfuscated)

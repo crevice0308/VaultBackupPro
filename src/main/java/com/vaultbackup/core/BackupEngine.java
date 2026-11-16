@@ -14,13 +14,14 @@ import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.DigestOutputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.text.Normalizer;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
@@ -31,22 +32,47 @@ import static java.nio.file.StandardOpenOption.*;
 
 /**
  * Standard-library-only archive storage with a final atomic sidecar commit marker.
- * Backups must be taken while the application has quiesced its writes. The change
- * checks detect ordinary races; they cannot provide a filesystem snapshot against
- * a hostile process with concurrent write access to the source or backup store.
+ *
+ * A running server keeps writing: player data, level.dat and plugin files are replaced or
+ * rewritten at any time, even while world autosave is off. Every file is therefore copied as
+ * one self-consistent version (the copy is repeated while the file changes underneath it), files
+ * that disappear are skipped, and a file that never settles is archived as last read and counted
+ * in {@link BackupRecord#unstableEntries()}. The archive always matches its own manifest. This is
+ * not a filesystem snapshot: files are not captured at one common instant.
  */
 public final class BackupEngine {
     public static final String MANIFEST_PATH = ".vaultbackup-manifest";
     public static final String MANIFEST_HEADER = "VAULTBACKUP-MANIFEST\t1";
     public static final long MAX_MANIFEST_BYTES = 128L * 1024 * 1024;
     private static final int BUFFER_SIZE = 128 * 1024;
+    /** Files up to this size are read completely before being archived, so an unstable read can be repeated. */
+    private static final int STABLE_READ_BYTES = 8 * 1024 * 1024;
+    /** Reads of one changing file before it is archived as last read and reported. */
+    private static final int STABLE_READ_ATTEMPTS = 4;
+    /** A file replaced by "rename old away, rename new in" is briefly absent; look again after these pauses. */
+    private static final long[] REAPPEAR_WAIT_MILLIS = {25, 75};
+    /** All such pauses of one backup together; a mass deletion must not stall the backup while autosave is off. */
+    private static final long REAPPEAR_BUDGET_MILLIS = 2_000;
+    /** Free space the backup store must keep, so a growing archive never fills a disk the server also writes to. */
+    private static final long SPACE_RESERVE_BYTES = 64L * 1024 * 1024;
+    /** Free space is looked at again each time this much has been written. */
+    private static final long SPACE_CHECK_INTERVAL_BYTES = 32L * 1024 * 1024;
+    /** Problems of one scan that are named individually in the refusal. */
+    private static final int MAX_REPORTED_PROBLEMS = 50;
+    /** Bytes one central-directory record may need beyond its name, generously. */
+    private static final long DIRECTORY_RECORD_OVERHEAD = 128;
     private static final Pattern ID = Pattern.compile("[0-9]{8}T[0-9]{9}Z-[a-f0-9]{12}");
-    /** Exactly the temporary names createBackup uses; nothing else in the store is ever swept. */
-    private static final Pattern ABANDONED_PART = Pattern.compile("\\.[0-9]{8}T[0-9]{9}Z-[a-f0-9]{12}\\.(?:zip|properties)\\.part");
+    /** Exactly the temporary names this class uses; nothing else in the store is ever swept. */
+    private static final Pattern ABANDONED_PART = Pattern.compile("\\.([0-9]{8}T[0-9]{9}Z-[a-f0-9]{12})\\.(zip|properties)\\.part");
     private static final Pattern HASH = Pattern.compile("[0-9a-f]{64}");
     private static final DateTimeFormatter ID_TIME = DateTimeFormatter.ofPattern("uuuuMMdd'T'HHmmssSSS'Z'").withZone(ZoneOffset.UTC);
     private static final BooleanSupplier NEVER_CANCEL = () -> false;
     private static final Consumer<String> NO_PROGRESS = value -> { };
+    /**
+     * One lock channel per store for the life of the JVM, never closed: on POSIX, closing any
+     * descriptor of a file drops every lock the process holds on it, including another engine's.
+     */
+    private static final Map<Path, LockFile> LOCK_FILES = new ConcurrentHashMap<>();
     private final BackupOptions options;
     private final Path root;
     private final Path destination;
@@ -56,16 +82,56 @@ public final class BackupEngine {
 
     public record ManifestEntry(String path, boolean directory, long size, String sha256) { }
     private record Source(Path path, String name, boolean directory, BasicFileAttributes attributes) { }
+    private record LockFile(FileChannel channel, Object fileKey) { }
     /** Identity, size and timestamps of an archive/sidecar pair at the moment it fully verified. */
     private record Fingerprint(Object zipKey, long zipSize, FileTime zipModified, FileTime zipCreated,
                                Object metadataKey, long metadataSize, FileTime metadataModified, FileTime metadataCreated) { }
     private record VerifiedArchive(Fingerprint fingerprint, BackupRecord record) { }
+
+    /** The source tree contains paths that cannot be archived. Every one found by the scan is listed. */
+    public static final class SourceRefusedException extends IOException {
+        private static final long serialVersionUID = 1L;
+        private final List<String> problems;
+        private final int total;
+        SourceRefusedException(List<String> problems, int total) {
+            super(total + " path(s) cannot be backed up; rename them or add them to backup.exclude:\n - " + String.join("\n - ", problems)
+                    + (total > problems.size() ? "\n - ... and " + (total - problems.size()) + " more" : ""));
+            this.problems = List.copyOf(problems);
+            this.total = total;
+        }
+        /** Up to the first fifty problems, each "path: reason". */
+        public List<String> problems() { return problems; }
+        public int total() { return total; }
+    }
+
+    /** The backup store does not have room for the next archive. Nothing, or only a removed partial file, was written. */
+    public static final class InsufficientSpaceException extends IOException {
+        private static final long serialVersionUID = 1L;
+        private final long neededBytes, availableBytes;
+        InsufficientSpaceException(long neededBytes, long availableBytes) {
+            super("Not enough free space in the backup directory: about " + neededBytes + " bytes needed, " + availableBytes + " available");
+            this.neededBytes = neededBytes;
+            this.availableBytes = availableBytes;
+        }
+        public long neededBytes() { return neededBytes; }
+        public long availableBytes() { return availableBytes; }
+    }
+
     /**
      * Archives this instance fully verified, keyed by ID. A listing reuses an entry only while
      * both files are provably the same, unchanged files; any difference forces full verification.
      * Explicit verify() and revalidateBackups() always re-read every byte. Guarded by this.
      */
     private final Map<String, VerifiedArchive> verifiedArchives = new HashMap<>();
+    /** Archives the last listing found but could not verify, with the reason. Guarded by this. */
+    private Map<String, String> rejected = Map.of();
+    /**
+     * Test seam only: called with the archive path after a file's bytes were read and before it is
+     * looked at again, i.e. at the one point where a concurrent writer makes the read unstable.
+     */
+    volatile Consumer<String> afterReadProbe;
+    /** Test seam only: replaces the free space reported by the backup store. */
+    volatile java.util.function.LongSupplier usableSpaceProbe;
 
     public BackupEngine(BackupOptions options) throws IOException {
         this.options = Objects.requireNonNull(options);
@@ -83,16 +149,41 @@ public final class BackupEngine {
     public Path serverRoot() { return root; }
     public Path backupDirectory() { return destination; }
 
+    /**
+     * Patterns that use glob syntax this engine does not implement. They are matched literally and
+     * therefore usually match nothing, which callers should tell the administrator.
+     */
+    public static List<String> unsupportedGlobSyntax(List<String> patterns) {
+        List<String> suspicious = new ArrayList<>();
+        for (String glob : patterns) {
+            if (glob != null && (glob.startsWith("!") || glob.startsWith("./") || glob.indexOf('{') >= 0 || glob.indexOf('}') >= 0
+                    || glob.indexOf('[') >= 0 || glob.indexOf(']') >= 0)) suspicious.add(glob);
+        }
+        return List.copyOf(suspicious);
+    }
+
     public synchronized BackupRecord createBackup(String label, BooleanSupplier cancelled,
                                                     Consumer<String> progress) throws IOException {
+        return createBackup(label, cancelled, progress, null);
+    }
+
+    /**
+     * @param unstable receives the archive path of every file that kept changing while it was copied.
+     *                 Such a file is archived exactly as last read; the count is stored with the backup.
+     * @throws SourceRefusedException when the tree holds paths that cannot be archived
+     * @throws InsufficientSpaceException when the store lacks room; the store is left as it was
+     */
+    public synchronized BackupRecord createBackup(String label, BooleanSupplier cancelled, Consumer<String> progress,
+                                                    Consumer<String> unstable) throws IOException {
         cancelled = cancellation(cancelled);
         progress = reporter(progress);
+        unstable = reporter(unstable);
         if (label == null) label = "";
         if (label.length() > 200 || label.chars().anyMatch(Character::isISOControl)) throw new IOException("Label must be at most 200 printable characters");
         checkCancelled(cancelled);
         checkedExistingDirectory(root);
         checkedExistingDirectory(destination);
-        try (FileChannel lockChannel = openLock(); FileLock ignored = acquireLock(lockChannel)) {
+        try (FileLock ignored = lockStore()) {
             removeAbandonedPartFiles();
             String id = ID_TIME.format(Instant.now()) + "-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
             Path tempZip = destination.resolve("." + id + ".zip.part");
@@ -103,52 +194,69 @@ public final class BackupEngine {
             try {
                 progress.accept("Scanning server files");
                 List<Source> sources = scan(cancelled);
-                List<ManifestEntry> manifest = new ArrayList<>();
+                long scannedBytes = 0, manifestBytes = MANIFEST_HEADER.length() + 1;
+                int files = 0;
+                for (Source source : sources) {
+                    if (!source.directory()) { files++; scannedBytes = saturatedAdd(scannedBytes, source.attributes().size()); }
+                    // Type, tab, decimal size, tab, digest, tab, unpadded base64 of the UTF-8 name, newline.
+                    manifestBytes += 90 + (source.name().getBytes(StandardCharsets.UTF_8).length * 4L + 2) / 3;
+                }
+                // A pattern that selects nothing would otherwise publish an empty archive, and retention
+                // would then replace real backups with it.
+                if (files == 0) throw new IOException("No files were selected for the backup; check backup.include and backup.exclude");
+                if (manifestBytes > MAX_MANIFEST_BYTES) throw new IOException("Backup has too many or too long paths for one archive manifest");
+                FileStore store = Files.getFileStore(destination);
+                requireSpace(store, estimateArchiveBytes(scannedBytes));
+                List<ManifestEntry> manifest = new ArrayList<>(sources.size());
                 long total = 0;
+                int unstableEntries = 0;
+                long[] reappearBudget = {REAPPEAR_BUDGET_MILLIS};
+                MessageDigest archiveDigest = sha256();
                 try (FileChannel channel = createPrivateFile(tempZip);
-                     ZipOutputStream output = new ZipOutputStream(Channels.newOutputStream(channel), StandardCharsets.UTF_8)) {
+                     ZipOutputStream output = new ZipOutputStream(new DigestOutputStream(
+                             new BufferedOutputStream(Channels.newOutputStream(channel), BUFFER_SIZE), archiveDigest), StandardCharsets.UTF_8)) {
                     output.setLevel(options.compressionLevel());
                     byte[] buffer = new byte[BUFFER_SIZE];
+                    long nextSpaceCheck = SPACE_CHECK_INTERVAL_BYTES;
                     for (Source source : sources) {
                         checkCancelled(cancelled);
-                        ensureSourceUnchanged(source);
-                        if (source.name().isEmpty()) continue; // Root is checked, never serialized.
-                        ZipEntry entry = new ZipEntry(source.name() + (source.directory() ? "/" : ""));
-                        entry.setLastModifiedTime(source.attributes().lastModifiedTime());
-                        output.putNextEntry(entry);
                         if (source.directory()) {
+                            if (!stillDirectory(source)) continue; // Removed since the scan; its former contents are skipped below.
+                            ZipEntry entry = new ZipEntry(source.name() + "/");
+                            entry.setLastModifiedTime(source.attributes().lastModifiedTime());
+                            output.putNextEntry(entry);
+                            output.closeEntry();
                             manifest.add(new ManifestEntry(source.name(), true, 0, "-"));
-                        } else {
-                            progress.accept("Backing up " + source.name());
-                            MessageDigest digest = sha256();
-                            long copied = 0;
-                            try (InputStream input = Channels.newInputStream(Files.newByteChannel(source.path(), Set.of(READ, NOFOLLOW_LINKS)))) {
-                                int count;
-                                while ((count = input.read(buffer)) != -1) {
-                                    checkCancelled(cancelled);
-                                    copied = boundedAdd(copied, count, options.maxEntryBytes(), "Entry exceeds byte limit");
-                                    total = boundedAdd(total, count, options.maxTotalBytes(), "Backup exceeds total byte limit");
-                                    digest.update(buffer, 0, count);
-                                    output.write(buffer, 0, count);
-                                }
-                            }
-                            ensureSourceUnchanged(source);
-                            if (copied != source.attributes().size()) throw new IOException("Source changed during backup: " + source.name());
-                            manifest.add(new ManifestEntry(source.name(), false, copied, hex(digest.digest())));
+                            continue;
                         }
-                        output.closeEntry();
+                        progress.accept("Backing up " + source.name());
+                        Copied copied = copyFile(source, output, buffer, total, store, reappearBudget, cancelled);
+                        if (copied == null) continue; // Deleted since the scan: a legitimate state of a live tree.
+                        total = boundedAdd(total, copied.size(), options.maxTotalBytes(), "Backup exceeds total byte limit");
+                        manifest.add(new ManifestEntry(source.name(), false, copied.size(), copied.sha256()));
+                        if (!copied.stable()) {
+                            unstableEntries++;
+                            unstable.accept(source.name());
+                        }
+                        if (total >= nextSpaceCheck) {
+                            requireReserve(store);
+                            nextSpaceCheck = total + SPACE_CHECK_INTERVAL_BYTES;
+                        }
                     }
-                    for (Source source : sources) ensureSourceUnchanged(source);
-                    output.putNextEntry(new ZipEntry(MANIFEST_PATH));
-                    writeManifest(output, manifest);
+                    ZipEntry manifestEntry = new ZipEntry(MANIFEST_PATH);
+                    output.putNextEntry(manifestEntry);
+                    long manifestSize = writeManifest(output, manifest);
                     output.closeEntry();
+                    requireVerifiableRatio(manifestEntry, manifestSize, MANIFEST_PATH);
                     output.finish();
                     output.flush();
                     channel.force(true);
                 }
                 checkCancelled(cancelled);
+                // The digest covers exactly the bytes handed to the file; validateArchive re-reads the
+                // file from disk below, so a write that did not reach storage intact cannot be published.
                 BackupRecord provisional = new BackupRecord(id, Instant.now(), label, tempZip, tempMetadata,
-                        Files.size(tempZip), total, manifest.size(), hashFile(tempZip, cancelled));
+                        Files.size(tempZip), total, manifest.size(), hex(archiveDigest.digest()), unstableEntries);
                 writeMetadata(tempMetadata, provisional);
                 progress.accept("Verifying new archive");
                 validateArchive(provisional, options, cancelled, progress);
@@ -158,22 +266,242 @@ public final class BackupEngine {
                 atomicMove(tempMetadata, metadata);
                 syncDirectory(destination); // Persist publication before retention may remove older generations.
                 committed = true;
+                BackupRecord record = new BackupRecord(id, provisional.createdAt(), label, zip, metadata,
+                        provisional.compressedBytes(), total, manifest.size(), provisional.sha256(), unstableEntries);
+                // Fully verified a moment ago under its temporary name; renaming changes neither file.
+                Fingerprint published = fingerprint(zip, metadata);
+                if (published != null) verifiedArchives.put(id, new VerifiedArchive(published, record));
                 progress.accept("Backup complete: " + id);
-                return new BackupRecord(id, provisional.createdAt(), label, zip, metadata,
-                        provisional.compressedBytes(), total, manifest.size(), provisional.sha256());
+                return record;
             } finally {
-                Files.deleteIfExists(tempZip);
-                Files.deleteIfExists(tempMetadata);
                 if (!committed) {
-                    Files.deleteIfExists(metadata);
-                    Files.deleteIfExists(zip);
+                    // The zip may already carry its final name when the sidecar's publication failed.
+                    deleteQuietly(metadata);
+                    deleteQuietly(zip);
                 }
+                deleteQuietly(tempZip);
+                deleteQuietly(tempMetadata);
             }
         }
     }
 
     public BackupRecord createBackup(String label) throws IOException {
         return createBackup(label, NEVER_CANCEL, NO_PROGRESS);
+    }
+
+    /** Cleanup must not replace the failure that led to it; a leftover is swept before the next backup. */
+    private static void deleteQuietly(Path path) {
+        try { Files.deleteIfExists(path); }
+        catch (IOException | RuntimeException leftover) { /* removeAbandonedPartFiles handles .part files later */ }
+    }
+
+    /**
+     * Size the new archive is likely to have, from how the most recent archive of this store
+     * compressed. Without one, half the source size: an estimate that is too high would refuse
+     * backups that fit. The reserve check during writing is the hard limit.
+     */
+    private long estimateArchiveBytes(long scannedBytes) {
+        BackupRecord latest = null;
+        for (VerifiedArchive known : verifiedArchives.values())
+            if (latest == null || known.record().createdAt().isAfter(latest.createdAt())) latest = known.record();
+        if (latest == null || latest.totalBytes() <= 0) return scannedBytes / 2;
+        double ratio = Math.min(1.0, latest.compressedBytes() / (double) latest.totalBytes());
+        return (long) Math.min((double) Long.MAX_VALUE, scannedBytes * ratio * 1.05);
+    }
+
+    private long usableSpace(FileStore store) throws IOException {
+        java.util.function.LongSupplier probe = usableSpaceProbe;
+        return probe != null ? probe.getAsLong() : store.getUsableSpace();
+    }
+
+    private void requireSpace(FileStore store, long archiveBytes) throws IOException {
+        long available = usableSpace(store);
+        long needed = saturatedAdd(archiveBytes, SPACE_RESERVE_BYTES);
+        if (available < needed) throw new InsufficientSpaceException(needed, available);
+    }
+
+    private void requireReserve(FileStore store) throws IOException {
+        long available = usableSpace(store);
+        if (available < SPACE_RESERVE_BYTES) throw new InsufficientSpaceException(SPACE_RESERVE_BYTES, available);
+    }
+
+    /**
+     * Verification refuses entries that expand by more than the configured ratio. A source file
+     * that compresses better than that would produce an archive this engine rejects afterwards,
+     * so it is reported while the reason is still known.
+     */
+    private void requireVerifiableRatio(ZipEntry entry, long size, String name) throws IOException {
+        long compressed = entry.getCompressedSize();
+        if (size > 0 && compressed >= 0 && size / (double) Math.max(1L, compressed) > options.maxCompressionRatio())
+            throw new IOException("File compresses beyond limits.max-compression-ratio and could not be verified afterwards (raise the limit or exclude it): " + name);
+    }
+
+    /** One archived file: the bytes written, their digest, and whether they are one settled version of the file. */
+    private record Copied(long size, String sha256, boolean stable) { }
+
+    /** False when the directory no longer exists. Anything else in its place is refused. */
+    private boolean stillDirectory(Source source) throws IOException {
+        requireNoSymlinkBelowRoot(source);
+        BasicFileAttributes now = attributesOrNull(source.path());
+        if (now == null) return false;
+        if (now.isSymbolicLink() || !now.isDirectory()) throw new IOException("Source directory was replaced by another file type: " + source.name());
+        return true;
+    }
+
+    /**
+     * No directory on the way to the entry may have become a symlink since the scan refused
+     * symlinks: opening the entry would then read outside the server root. The entry itself is
+     * opened without following links.
+     */
+    private void requireNoSymlinkBelowRoot(Source source) throws IOException {
+        Path cursor = root;
+        Path relative = root.relativize(source.path());
+        int parents = relative.getNameCount() - 1;
+        for (int i = 0; i < parents; i++) {
+            cursor = cursor.resolve(relative.getName(i));
+            if (Files.isSymbolicLink(cursor)) throw new IOException("A directory became a symlink during the backup: " + relative(cursor));
+        }
+    }
+
+    /** Current attributes without following links; null when nothing exists at the path any more. */
+    private static BasicFileAttributes attributesOrNull(Path path) throws IOException {
+        try { return Files.readAttributes(path, BasicFileAttributes.class, NOFOLLOW_LINKS); }
+        catch (NoSuchFileException gone) { return null; }
+    }
+
+    /** Null when the file is gone. A symlink or special file that took its place is refused, never followed. */
+    private BasicFileAttributes regularOrNull(Source source) throws IOException {
+        requireNoSymlinkBelowRoot(source);
+        BasicFileAttributes now = attributesOrNull(source.path());
+        if (now != null && (now.isSymbolicLink() || !now.isRegularFile()))
+            throw new IOException("Source file was replaced by a symlink or special file: " + source.name());
+        return now;
+    }
+
+    private void probeAfterRead(Source source) {
+        Consumer<String> probe = afterReadProbe;
+        if (probe != null) probe.accept(source.name());
+    }
+
+    private static boolean sameVersion(BasicFileAttributes a, BasicFileAttributes b) {
+        return sameIdentity(a, b) && a.size() == b.size() && a.lastModifiedTime().equals(b.lastModifiedTime());
+    }
+
+    private static void pause(long millis, BooleanSupplier cancelled) throws InterruptedIOException {
+        checkCancelled(cancelled);
+        try { Thread.sleep(millis); }
+        catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new InterruptedIOException("Backup operation cancelled");
+        }
+        checkCancelled(cancelled);
+    }
+
+    /**
+     * Looks for a file that is absent right now. Only when its directory still exists can it be in
+     * the gap of a two-step replacement, and only then is it worth a short wait.
+     */
+    private BasicFileAttributes awaitReappearance(Source source, long[] budgetMillis, BooleanSupplier cancelled) throws IOException {
+        for (long wait : REAPPEAR_WAIT_MILLIS) {
+            if (budgetMillis[0] < wait || attributesOrNull(source.path().getParent()) == null) return null;
+            budgetMillis[0] -= wait;
+            pause(wait, cancelled);
+            BasicFileAttributes now = regularOrNull(source);
+            if (now != null) return now;
+        }
+        return null;
+    }
+
+    /**
+     * Archives one file as a single self-consistent version, or returns null if it no longer exists.
+     * A file being replaced (written elsewhere and renamed into place) is read from whichever
+     * complete version is open; a file rewritten in place is read again until two looks agree.
+     */
+    private Copied copyFile(Source source, ZipOutputStream output, byte[] buffer, long totalSoFar, FileStore store,
+                            long[] reappearBudget, BooleanSupplier cancelled) throws IOException {
+        byte[] lastRead = null;
+        BasicFileAttributes lastSeen = null;
+        for (int attempt = 1; attempt <= STABLE_READ_ATTEMPTS; attempt++) {
+            if (attempt > 1) pause(150L * (attempt - 1), cancelled);
+            BasicFileAttributes before = regularOrNull(source);
+            if (before == null) before = awaitReappearance(source, reappearBudget, cancelled);
+            if (before == null) return null; // Deleted meanwhile; an earlier partial look at it is not archived.
+            if (before.size() > options.maxEntryBytes()) throw new IOException("File exceeds entry byte limit: " + source.name());
+            if (before.size() > STABLE_READ_BYTES) return streamLargeFile(source, before, output, buffer, totalSoFar, store, cancelled);
+            byte[] bytes;
+            try (InputStream input = Channels.newInputStream(Files.newByteChannel(source.path(), Set.of(READ, NOFOLLOW_LINKS)))) {
+                bytes = input.readNBytes(STABLE_READ_BYTES + 1);
+            } catch (NoSuchFileException replacedMeanwhile) { continue; }
+            if (bytes.length > STABLE_READ_BYTES) continue; // Grew past the in-memory bound while open; look again.
+            lastRead = bytes;
+            lastSeen = before;
+            probeAfterRead(source);
+            BasicFileAttributes after = regularOrNull(source);
+            if (after != null && sameVersion(before, after) && bytes.length == before.size())
+                return writeBuffered(source, before, bytes, output, totalSoFar, true);
+        }
+        if (lastRead == null) {
+            // Every look found it absent for a moment or grown past the in-memory bound.
+            BasicFileAttributes now = regularOrNull(source);
+            if (now == null) return null;
+            return streamLargeFile(source, now, output, buffer, totalSoFar, store, cancelled);
+        }
+        return writeBuffered(source, lastSeen, lastRead, output, totalSoFar, false);
+    }
+
+    private Copied writeBuffered(Source source, BasicFileAttributes attributes, byte[] bytes, ZipOutputStream output,
+                                 long totalSoFar, boolean stable) throws IOException {
+        boundedAdd(0, bytes.length, options.maxEntryBytes(), "Entry exceeds byte limit");
+        boundedAdd(totalSoFar, bytes.length, options.maxTotalBytes(), "Backup exceeds total byte limit");
+        ZipEntry entry = new ZipEntry(source.name());
+        entry.setLastModifiedTime(attributes.lastModifiedTime());
+        output.putNextEntry(entry);
+        output.write(bytes);
+        output.closeEntry();
+        requireVerifiableRatio(entry, bytes.length, source.name());
+        return new Copied(bytes.length, hex(sha256().digest(bytes)), stable);
+    }
+
+    /**
+     * Too large to hold in memory, so it cannot be read twice into the same ZIP entry. The bytes are
+     * consistent when the file is the same version before and after, or when it was replaced by
+     * another file while the complete earlier version stayed open. Otherwise it is reported.
+     */
+    private Copied streamLargeFile(Source source, BasicFileAttributes before, ZipOutputStream output, byte[] buffer,
+                                   long totalSoFar, FileStore store, BooleanSupplier cancelled) throws IOException {
+        FileChannel channel;
+        try { channel = FileChannel.open(source.path(), Set.of(READ, NOFOLLOW_LINKS)); }
+        catch (NoSuchFileException gone) { return null; }
+        try (channel) {
+            ZipEntry entry = new ZipEntry(source.name());
+            entry.setLastModifiedTime(before.lastModifiedTime());
+            output.putNextEntry(entry);
+            MessageDigest digest = sha256();
+            long copied = 0, nextSpaceCheck = SPACE_CHECK_INTERVAL_BYTES;
+            InputStream input = Channels.newInputStream(channel);
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                checkCancelled(cancelled);
+                copied = boundedAdd(copied, count, options.maxEntryBytes(), "Entry exceeds byte limit");
+                boundedAdd(totalSoFar, copied, options.maxTotalBytes(), "Backup exceeds total byte limit");
+                digest.update(buffer, 0, count);
+                output.write(buffer, 0, count);
+                if (copied >= nextSpaceCheck) {
+                    requireReserve(store);
+                    nextSpaceCheck = copied + SPACE_CHECK_INTERVAL_BYTES;
+                }
+            }
+            long openSize = channel.size();
+            output.closeEntry();
+            requireVerifiableRatio(entry, copied, source.name());
+            probeAfterRead(source);
+            BasicFileAttributes after = regularOrNull(source);
+            boolean unchanged = after != null && sameVersion(before, after) && copied == before.size();
+            // Replaced by rename (or deleted) while open: the open file is the complete earlier version
+            // as long as nothing changed its length after it was looked at.
+            boolean replaced = (after == null || !sameIdentity(before, after)) && copied == before.size() && openSize == before.size();
+            return new Copied(copied, hex(digest.digest()), unchanged || replaced);
+        }
     }
 
     /**
@@ -195,25 +523,43 @@ public final class BackupEngine {
         return catalogue(cancelled, progress, true);
     }
 
+    /**
+     * Archives the most recent listing found in the store but did not return, each with the reason:
+     * corrupt or incomplete files, or an archive beyond the configured limits. They occupy space, are
+     * not counted by retention, and can be removed with {@link #delete}.
+     */
+    public synchronized Map<String, String> rejectedArchives() { return rejected; }
+
     private List<BackupRecord> catalogue(BooleanSupplier cancelled, Consumer<String> progress, boolean revalidate) throws IOException {
         List<BackupRecord> good = new ArrayList<>();
         Set<String> present = new HashSet<>();
+        Map<String, String> refused = new TreeMap<>();
         checkedExistingDirectory(destination);
-        try (DirectoryStream<Path> paths = Files.newDirectoryStream(destination, "*.properties")) {
+        try (DirectoryStream<Path> paths = Files.newDirectoryStream(destination)) {
+            Set<String> zips = new HashSet<>();
+            List<String> sidecars = new ArrayList<>();
             for (Path path : paths) {
-                checkCancelled(cancellation(cancelled));
                 String name = path.getFileName().toString();
-                String id = name.substring(0, name.length() - ".properties".length());
-                if (!ID.matcher(id).matches()) continue;
+                if (name.endsWith(".properties") && ID.matcher(name.substring(0, name.length() - ".properties".length())).matches())
+                    sidecars.add(name.substring(0, name.length() - ".properties".length()));
+                else if (name.endsWith(".zip") && ID.matcher(name.substring(0, name.length() - ".zip".length())).matches())
+                    zips.add(name.substring(0, name.length() - ".zip".length()));
+            }
+            for (String id : sidecars) {
+                checkCancelled(cancellation(cancelled));
                 present.add(id);
+                zips.remove(id);
                 try {
                     BackupRecord unchanged = revalidate ? null : unchangedVerified(id);
                     good.add(unchanged != null ? unchanged : verify(id, cancelled, progress));
                 } catch (InterruptedIOException e) { throw e; }
-                catch (IOException e) { reporter(progress).accept("Ignoring incomplete or corrupt backup " + id + ": " + e.getMessage()); }
+                catch (IOException e) { refused.put(id, String.valueOf(e.getMessage())); }
             }
+            // An archive without its sidecar was never committed, or its deletion was interrupted.
+            for (String id : zips) refused.put(id, "Archive has no metadata file (never completed, or its deletion was interrupted)");
         }
         verifiedArchives.keySet().retainAll(present);
+        rejected = Collections.unmodifiableMap(refused);
         good.sort(Comparator.comparing(BackupRecord::createdAt).reversed().thenComparing(BackupRecord::id));
         return List.copyOf(good);
     }
@@ -272,6 +618,7 @@ public final class BackupEngine {
     /** Read after verification; the caller must still hold exclusive control of the archive store. */
     public static List<ManifestEntry> readManifest(BackupRecord record) throws IOException {
         ensureRegularFile(record.zipPath());
+        ZipDirectory.requireWithin(record.zipPath(), 1_000_001L, MAX_MANIFEST_BYTES + 1_000_001L * DIRECTORY_RECORD_OVERHEAD);
         try (ZipFile zip = new ZipFile(record.zipPath().toFile(), StandardCharsets.UTF_8)) {
             ZipEntry manifest = zip.getEntry(MANIFEST_PATH);
             if (manifest == null || manifest.isDirectory()) throw new IOException("Missing manifest");
@@ -280,19 +627,23 @@ public final class BackupEngine {
     }
 
     /**
-     * Deletes a verified backup, including the final recovery point. Restore
-     * reservations stay protected. The current verified store, not a UI catalogue
-     * snapshot, determines whether the target is valid under the store lock.
+     * Deletes the named backup, including the final recovery point and including an archive that
+     * no longer verifies (the administrator named it; it could never be restored anyway). Restore
+     * reservations stay protected. Nothing else in the store is read.
      */
     public synchronized void delete(String id, Set<String> protectedIds) throws IOException {
         validateId(id);
         Set<String> protectedCopy = Set.copyOf(Objects.requireNonNull(protectedIds));
         if (protectedCopy.contains(id)) throw new BackupDeletionRefusedException(
                 BackupDeletionRefusedException.Reason.RESTORE_PROTECTED, id);
-        try (FileChannel channel = openLock(); FileLock ignored = acquireLock(channel)) {
-            List<BackupRecord> good = listBackups();
-            BackupRecord target = good.stream().filter(r -> r.id().equals(id)).findFirst().orElseThrow(() -> new IOException("Backup is missing or corrupt: " + id));
-            removeRecord(target);
+        try (FileLock ignored = lockStore()) {
+            removeAbandonedPartFiles();
+            Path zip = destination.resolve(id + ".zip"), metadata = destination.resolve(id + ".properties");
+            boolean hasZip = Files.exists(zip, NOFOLLOW_LINKS), hasMetadata = Files.exists(metadata, NOFOLLOW_LINKS);
+            if (!hasZip && !hasMetadata) throw new IOException("Backup does not exist: " + id);
+            if (hasZip) ensureRegularFile(zip);
+            if (hasMetadata) ensureRegularFile(metadata);
+            withdraw(id);
         }
     }
 
@@ -303,7 +654,8 @@ public final class BackupEngine {
         Set<String> protectedCopy = Set.copyOf(Objects.requireNonNull(protectedIds));
         cancelled = cancellation(cancelled);
         progress = reporter(progress);
-        try (FileChannel channel = openLock(); FileLock ignored = acquireLock(channel)) {
+        try (FileLock ignored = lockStore()) {
+            removeAbandonedPartFiles();
             List<BackupRecord> good = new ArrayList<>(listBackups(cancelled, progress));
             List<BackupRecord> removed = new ArrayList<>();
             long bytes = 0;
@@ -313,7 +665,9 @@ public final class BackupEngine {
                 checkCancelled(cancelled);
                 BackupRecord target = good.get(i);
                 if (protectedCopy.contains(target.id())) continue;
-                removeRecord(target);
+                ensureRegularFile(target.zipPath());
+                ensureRegularFile(target.metadataPath());
+                withdraw(target.id());
                 removed.add(target);
                 remaining--;
                 bytes -= target.compressedBytes();
@@ -323,32 +677,50 @@ public final class BackupEngine {
         }
     }
 
-    private void removeRecord(BackupRecord target) throws IOException {
-        ensureRegularFile(target.zipPath());
-        ensureRegularFile(target.metadataPath());
-        verifiedArchives.remove(target.id());
-        // Withdraw the commit marker first, so an interrupted delete is never listed.
-        Files.delete(target.metadataPath());
+    /**
+     * Caller holds the store lock. Both files are first renamed to the temporary names the sweeper
+     * owns, the sidecar (the commit marker) first. From that rename on the backup is gone from every
+     * listing, and whatever an interruption leaves behind is removed before the next change to the store.
+     */
+    private void withdraw(String id) throws IOException {
+        verifiedArchives.remove(id);
+        Path zip = destination.resolve(id + ".zip"), metadata = destination.resolve(id + ".properties");
+        Path zipPart = destination.resolve("." + id + ".zip.part"), metadataPart = destination.resolve("." + id + ".properties.part");
+        if (Files.exists(metadata, NOFOLLOW_LINKS)) Files.move(metadata, metadataPart, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        if (Files.exists(zip, NOFOLLOW_LINKS)) Files.move(zip, zipPart, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         syncDirectory(destination);
-        Files.delete(target.zipPath());
+        Files.deleteIfExists(metadataPart);
+        Files.deleteIfExists(zipPart);
         syncDirectory(destination);
     }
 
     /**
-     * Caller holds the store lock. Only createBackup writes ".ID.zip.part" / ".ID.properties.part"
-     * files, and always under that lock, so any found now were left by a crash or a forced JVM
-     * stop and would otherwise occupy disk space forever. Best effort: never blocks a backup.
+     * Caller holds the store lock. Only this class writes ".ID.zip.part" / ".ID.properties.part"
+     * files, and always under that lock, so any found now were left by a crash, a forced JVM stop
+     * or an interrupted deletion and would otherwise occupy disk space forever. An "ID.zip" whose
+     * sidecar is still such a part file belongs to the same interrupted step and goes with it.
+     * Best effort: never blocks the operation that called it.
      */
     private void removeAbandonedPartFiles() {
         List<Path> abandoned = new ArrayList<>();
+        Set<String> sidecarParts = new HashSet<>();
         try (DirectoryStream<Path> paths = Files.newDirectoryStream(destination, ".*.part")) {
-            for (Path path : paths) if (ABANDONED_PART.matcher(path.getFileName().toString()).matches()) abandoned.add(path);
+            for (Path path : paths) {
+                java.util.regex.Matcher match = ABANDONED_PART.matcher(path.getFileName().toString());
+                if (!match.matches()) continue;
+                abandoned.add(path);
+                if (match.group(2).equals("properties")) sidecarParts.add(match.group(1));
+            }
         } catch (IOException | DirectoryIteratorException unreadable) { return; }
+        for (String id : sidecarParts) {
+            Path zip = destination.resolve(id + ".zip");
+            if (Files.notExists(destination.resolve(id + ".properties"), NOFOLLOW_LINKS) && Files.exists(zip, NOFOLLOW_LINKS)) abandoned.add(zip);
+        }
         for (Path path : abandoned) {
             try {
                 BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class, NOFOLLOW_LINKS);
                 if (attributes.isRegularFile() && !attributes.isSymbolicLink()) Files.deleteIfExists(path);
-            } catch (IOException ignored) { /* Leave it for the next attempt; never fail the backup over cleanup. */ }
+            } catch (IOException ignored) { /* Leave it for the next attempt; never fail the caller over cleanup. */ }
         }
     }
 
@@ -363,16 +735,26 @@ public final class BackupEngine {
         }
     }
 
-    private FileChannel openLock() throws IOException {
+    private FileLock lockStore() throws IOException {
         checkedExistingDirectory(destination);
         Path lockPath = destination.resolve(".vaultbackup.lock");
-        if (Files.exists(lockPath, NOFOLLOW_LINKS)) ensureRegularFile(lockPath);
-        return FileChannel.open(lockPath, CREATE, WRITE, NOFOLLOW_LINKS);
-    }
-
-    private static FileLock acquireLock(FileChannel channel) throws IOException {
+        Object currentKey = null;
+        if (Files.exists(lockPath, NOFOLLOW_LINKS)) currentKey = ensureRegularFile(lockPath).fileKey();
+        LockFile known = LOCK_FILES.get(lockPath);
+        // A lock file somebody removed and recreated is another file; the earlier channel stays open forever.
+        if (known == null || !Objects.equals(known.fileKey(), currentKey) || !known.channel().isOpen()) {
+            FileChannel channel;
+            try {
+                channel = FileChannel.open(lockPath, Set.of(CREATE, WRITE, NOFOLLOW_LINKS),
+                        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+            } catch (UnsupportedOperationException nonPosix) {
+                channel = FileChannel.open(lockPath, CREATE, WRITE, NOFOLLOW_LINKS);
+            }
+            known = new LockFile(channel, ensureRegularFile(lockPath).fileKey());
+            LOCK_FILES.put(lockPath, known);
+        }
         try {
-            FileLock lock = channel.tryLock();
+            FileLock lock = known.channel().tryLock();
             if (lock == null) throw new IOException("Backup store is busy in another process");
             return lock;
         } catch (OverlappingFileLockException e) {
@@ -380,19 +762,28 @@ public final class BackupEngine {
         }
     }
 
+    /**
+     * Lists what exists now. Entries that disappear while the tree is walked are skipped: on a
+     * running server temporary files come and go, and that is not an error. Unreadable entries,
+     * symlinks, special files and names an archive cannot carry fail the backup. All of them are
+     * collected first, so one run tells the administrator everything there is to fix or exclude.
+     */
     private List<Source> scan(BooleanSupplier cancelled) throws IOException {
         List<Source> sources = new ArrayList<>();
-        Set<String> portableNames = new HashSet<>();
-        BasicFileAttributes rootBefore = Files.readAttributes(root, BasicFileAttributes.class, NOFOLLOW_LINKS);
+        PortablePaths names = new PortablePaths(2L * options.maxEntries() + 1024);
+        List<String> problems = new ArrayList<>();
+        int[] problemCount = {0};
         Files.walkFileTree(root, new SimpleFileVisitor<>() {
+            private void problem(String name, String reason) {
+                if (problemCount[0]++ < MAX_REPORTED_PROBLEMS) problems.add(printable(name) + ": " + reason);
+            }
             @Override public FileVisitResult preVisitDirectory(Path directory, BasicFileAttributes attrs) throws IOException {
                 checkCancelled(cancelled);
                 if (isAutomaticallyExcluded(directory)) return FileVisitResult.SKIP_SUBTREE;
                 String name = relative(directory);
                 if (!name.isEmpty() && denied(name, true)) return FileVisitResult.SKIP_SUBTREE;
                 if (attrs.isSymbolicLink() || !attrs.isDirectory()) throw new IOException("Unsafe directory: " + directory);
-                checkedAbsolutePath(directory);
-                if (!name.isEmpty()) addSource(directory, name, true, attrs);
+                if (!name.isEmpty() && !addSource(directory, name, true, attrs)) return FileVisitResult.SKIP_SUBTREE;
                 return FileVisitResult.CONTINUE;
             }
             @Override public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
@@ -400,26 +791,65 @@ public final class BackupEngine {
                 if (isAutomaticallyExcluded(file)) return FileVisitResult.CONTINUE;
                 String name = relative(file);
                 if (denied(name, false) || !included(name)) return FileVisitResult.CONTINUE;
-                if (attrs.isSymbolicLink() || !attrs.isRegularFile()) throw new IOException("Symlinks and nonregular files are refused: " + name);
-                if (attrs.size() > options.maxEntryBytes()) throw new IOException("File exceeds entry byte limit: " + name);
-                addSource(file, name, false, attrs);
+                if (attrs.isSymbolicLink()) problem(name, "symlink (not followed)");
+                else if (!attrs.isRegularFile()) problem(name, "not a regular file");
+                else if (attrs.size() > options.maxEntryBytes()) problem(name, "larger than limits.max-entry-bytes");
+                else addSource(file, name, false, attrs);
                 return FileVisitResult.CONTINUE;
             }
-            @Override public FileVisitResult visitFileFailed(Path file, IOException exception) throws IOException { throw exception; }
-            private void addSource(Path file, String name, boolean directory, BasicFileAttributes attrs) throws IOException {
-                validateEntryPath(name);
-                if (name.equalsIgnoreCase(MANIFEST_PATH)) throw new IOException("Source uses reserved manifest name");
-                if (!portableNames.add(portableKey(name))) throw new IOException("Case/Unicode-colliding archive paths: " + name);
-                if (sources.size() >= options.maxEntries()) throw new IOException("Backup entry count exceeds limit");
+            @Override public FileVisitResult visitFileFailed(Path file, IOException exception) throws IOException {
+                return failed(file, exception);
+            }
+            @Override public FileVisitResult postVisitDirectory(Path directory, IOException exception) throws IOException {
+                // Non-null when listing stopped early.
+                return exception == null ? FileVisitResult.CONTINUE : failed(directory, exception);
+            }
+            /** A directory that cannot be opened arrives here without preVisitDirectory, so exclusions are applied here too. */
+            private FileVisitResult failed(Path path, IOException exception) throws IOException {
+                if (path.equals(root)) throw new IOException("Cannot read the server root: " + root, exception);
+                if (exception instanceof NoSuchFileException) return FileVisitResult.CONTINUE; // Removed underneath the walk.
+                if (isAutomaticallyExcluded(path)) return FileVisitResult.CONTINUE;
+                String name = relative(path);
+                if (denied(name, true) || denied(name, false)) return FileVisitResult.CONTINUE;
+                problem(name, "cannot be read (" + exception.getClass().getSimpleName() + ")");
+                return FileVisitResult.CONTINUE;
+            }
+            /** False when the entry was recorded as a problem instead. */
+            private boolean addSource(Path file, String name, boolean directory, BasicFileAttributes attrs) throws IOException {
+                // A name the JVM's file-name encoding cannot represent was decoded with replacement
+                // characters; it does not lead back to the file, and the archive would carry a wrong name.
+                boolean representable;
+                try { representable = root.resolve(name).equals(file); }
+                catch (InvalidPathException undecodable) { representable = false; }
+                if (!representable) {
+                    problem(name, "file name cannot be represented with this JVM's file-name encoding (start the server with a UTF-8 locale such as LC_ALL=C.UTF-8)");
+                    return false;
+                }
+                try { validateEntryPath(name); }
+                catch (IOException unsafe) { problem(name, "name is not portable (control character, one of \\ : < > \" | ? *, a trailing dot or space, or a reserved device name)"); return false; }
+                if (name.equalsIgnoreCase(MANIFEST_PATH)) { problem(name, "reserved name"); return false; }
+                try { names.add(name, directory); }
+                catch (IOException collision) { problem(name, "differs from another path only by letter case or Unicode form"); return false; }
+                if (sources.size() >= options.maxEntries()) throw new IOException("Backup entry count exceeds limits.max-entries");
                 sources.add(new Source(file, name, directory, attrs));
+                return true;
             }
         });
-        BasicFileAttributes rootAfter = Files.readAttributes(root, BasicFileAttributes.class, NOFOLLOW_LINKS);
-        if (!sameIdentity(rootBefore, rootAfter) || !rootBefore.lastModifiedTime().equals(rootAfter.lastModifiedTime())) throw new IOException("Server root changed while scanning");
+        if (problemCount[0] > 0) throw new SourceRefusedException(problems, problemCount[0]);
+        // Parents sort before their children, so a directory entry always precedes its contents.
         sources.sort(Comparator.comparing(Source::name));
-        // The root is not an archive entry, but must be checked again after copy.
-        sources.addFirst(new Source(root, "", true, rootBefore));
         return sources;
+    }
+
+    /** For messages: a path with control characters and the replacement character made visible. */
+    private static String printable(String name) {
+        StringBuilder text = new StringBuilder(name.length());
+        for (int i = 0; i < name.length(); i++) {
+            char c = name.charAt(i);
+            if (Character.isISOControl(c) || c == '\uFFFD') text.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
+            else text.append(c);
+        }
+        return text.length() > 300 ? text.substring(0, 300) + "..." : text.toString();
     }
 
     private boolean isAutomaticallyExcluded(Path path) {
@@ -430,15 +860,6 @@ public final class BackupEngine {
     private boolean included(String path) { return includes.isEmpty() || includes.stream().anyMatch(p -> p.matcher(path).matches()); }
     private boolean denied(String path, boolean directory) {
         return excludes.stream().anyMatch(p -> p.matcher(path).matches() || (directory && p.matcher(path + "/").matches()));
-    }
-
-    private static void ensureSourceUnchanged(Source source) throws IOException {
-        checkedAbsolutePath(source.path());
-        BasicFileAttributes now = Files.readAttributes(source.path(), BasicFileAttributes.class, NOFOLLOW_LINKS);
-        BasicFileAttributes before = source.attributes();
-        if (now.isSymbolicLink() || now.isDirectory() != source.directory() || (!source.directory() && !now.isRegularFile()) ||
-                !sameIdentity(before, now) || !before.lastModifiedTime().equals(now.lastModifiedTime()) ||
-                (!source.directory() && before.size() != now.size())) throw new IOException("Source changed during backup: " + source.path());
     }
 
     private static boolean sameIdentity(BasicFileAttributes a, BasicFileAttributes b) {
@@ -457,12 +878,12 @@ public final class BackupEngine {
         if (before.size() != record.compressedBytes()) throw new IOException("Archive size does not match metadata");
         if (!MessageDigest.isEqual(hashFile(record.zipPath(), cancelled).getBytes(StandardCharsets.US_ASCII),
                 record.sha256().getBytes(StandardCharsets.US_ASCII))) throw new IOException("Whole-archive SHA-256 mismatch");
+        // ZipFile reads the whole central directory into memory as soon as it opens the file.
+        ZipDirectory.requireWithin(record.zipPath(), limits.maxEntries() + 1L,
+                MAX_MANIFEST_BYTES + (limits.maxEntries() + 1L) * DIRECTORY_RECORD_OVERHEAD);
         try (ZipFile zip = new ZipFile(record.zipPath().toFile(), StandardCharsets.UTF_8)) {
             Map<String, ZipEntry> entries = new LinkedHashMap<>();
-            Set<String> portable = new HashSet<>();
-            Map<String, String> spellings = new HashMap<>();
-            Set<String> filePaths = new HashSet<>();
-            Set<String> directoryPaths = new HashSet<>();
+            PortablePaths names = new PortablePaths(2L * limits.maxEntries() + 1024);
             ZipEntry manifestEntry = null;
             Enumeration<? extends ZipEntry> enumeration = zip.entries();
             while (enumeration.hasMoreElements()) {
@@ -477,8 +898,9 @@ public final class BackupEngine {
                 if (entry.isDirectory()) name = name.substring(0, name.length() - 1);
                 validateEntryPath(name);
                 if (name.equalsIgnoreCase(MANIFEST_PATH)) throw new IOException("Reserved manifest name collision");
-                if (entries.putIfAbsent(name, entry) != null || !portable.add(portableKey(name))) throw new IOException("Duplicate/colliding ZIP entry: " + name);
-                registerPortablePath(name, entry.isDirectory(), spellings, filePaths, directoryPaths);
+                if (entries.putIfAbsent(name, entry) != null) throw new IOException("Duplicate ZIP entry: " + name);
+                // Also refuses case/Unicode aliases at any depth and a file that is an ancestor of another entry.
+                names.add(name, entry.isDirectory());
                 if (entries.size() > limits.maxEntries()) throw new IOException("Archive entry count exceeds limit");
                 if (entry.getSize() < 0 || entry.getCompressedSize() < 0 || entry.getSize() > limits.maxEntryBytes()) throw new IOException("Invalid or excessive ZIP entry size: " + name);
                 if (entry.isDirectory() && entry.getSize() != 0) throw new IOException("Directory contains data: " + name);
@@ -494,13 +916,6 @@ public final class BackupEngine {
                 checkCancelled(cancelled);
                 ZipEntry entry = entries.remove(expected.path());
                 if (entry == null || entry.isDirectory() != expected.directory() || entry.getSize() != expected.size()) throw new IOException("Manifest/ZIP disagreement: " + expected.path());
-                // A file must never be an ancestor of another entry.
-                String parent = expected.path();
-                while (parent.contains("/")) {
-                    parent = parent.substring(0, parent.lastIndexOf('/'));
-                    ZipEntry ancestor = zip.getEntry(parent);
-                    if (ancestor != null && !ancestor.isDirectory()) throw new IOException("File/directory path conflict: " + expected.path());
-                }
                 progress.accept("Verifying " + expected.path());
                 MessageDigest digest = sha256();
                 CRC32 crc = new CRC32();
@@ -549,7 +964,7 @@ public final class BackupEngine {
                     path = strictUtf8(Base64.getUrlDecoder().decode(fields[3]));
                 } catch (IllegalArgumentException e) { throw new IOException("Invalid manifest encoding", e); }
                 validateEntryPath(path);
-                if (path.equalsIgnoreCase(MANIFEST_PATH) || !paths.add(portableKey(path))) throw new IOException("Reserved or duplicate manifest path");
+                if (path.equalsIgnoreCase(MANIFEST_PATH) || !paths.add(PortablePaths.key(path))) throw new IOException("Reserved or duplicate manifest path");
                 if (directory ? (size != 0 || !fields[2].equals("-")) : !HASH.matcher(fields[2]).matches()) throw new IOException("Invalid manifest digest");
                 result.add(new ManifestEntry(path, directory, size, fields[2]));
             }
@@ -589,7 +1004,7 @@ public final class BackupEngine {
         }
     }
 
-    private static void writeManifest(OutputStream output, List<ManifestEntry> entries) throws IOException {
+    private static long writeManifest(OutputStream output, List<ManifestEntry> entries) throws IOException {
         long length = 0;
         byte[] header = (MANIFEST_HEADER + "\n").getBytes(StandardCharsets.UTF_8);
         output.write(header); length += header.length;
@@ -599,6 +1014,7 @@ public final class BackupEngine {
             length = boundedAdd(length, line.length, MAX_MANIFEST_BYTES, "Manifest exceeds size limit");
             output.write(line);
         }
+        return length;
     }
 
     private static void writeMetadata(Path target, BackupRecord record) throws IOException {
@@ -611,6 +1027,8 @@ public final class BackupEngine {
         metadata.setProperty("totalBytes", Long.toString(record.totalBytes()));
         metadata.setProperty("entryCount", Integer.toString(record.entryCount()));
         metadata.setProperty("sha256", record.sha256());
+        // Optional field (absent before 1.3.0): files that kept changing while they were copied.
+        metadata.setProperty("unstableEntries", Integer.toString(record.unstableEntries()));
         try (FileChannel channel = createPrivateFile(target)) {
             OutputStream output = Channels.newOutputStream(channel);
             metadata.store(output, "VaultBackup Pro completed archive metadata v1");
@@ -638,9 +1056,10 @@ public final class BackupEngine {
             long total = Long.parseLong(required(metadata, "totalBytes"));
             int count = Integer.parseInt(required(metadata, "entryCount"));
             String label = required(metadata, "label");
-            if (bytes < 1 || total < 0 || count < 0 || label.length() > 200 || label.chars().anyMatch(Character::isISOControl)) throw new IOException("Invalid archive metadata");
+            int unstable = Integer.parseInt(metadata.getProperty("unstableEntries", "0"));
+            if (bytes < 1 || total < 0 || count < 0 || unstable < 0 || unstable > count || label.length() > 200 || label.chars().anyMatch(Character::isISOControl)) throw new IOException("Invalid archive metadata");
             return new BackupRecord(id, Instant.parse(required(metadata, "createdAt")), label,
-                    zip.toAbsolutePath().normalize(), path.toAbsolutePath().normalize(), bytes, total, count, digest);
+                    zip.toAbsolutePath().normalize(), path.toAbsolutePath().normalize(), bytes, total, count, digest, unstable);
         } catch (RuntimeException e) { throw new IOException("Malformed metadata", e); }
     }
 
@@ -668,28 +1087,6 @@ public final class BackupEngine {
         if (id == null || !ID.matcher(id).matches()) throw new IOException("Invalid backup ID");
     }
 
-    private static void registerPortablePath(String path, boolean directory, Map<String, String> spellings,
-                                             Set<String> files, Set<String> directories) throws IOException {
-        StringBuilder prefix = new StringBuilder();
-        String[] components = path.split("/");
-        for (int i = 0; i < components.length; i++) {
-            if (i != 0) prefix.append('/');
-            prefix.append(components[i]);
-            String spelling = prefix.toString();
-            String key = portableKey(spelling);
-            String previous = spellings.putIfAbsent(key, spelling);
-            if (previous != null && !previous.equals(spelling)) throw new IOException("Case/Unicode-alias ancestor path: " + path);
-            if (i < components.length - 1 || directory) {
-                if (files.contains(key)) throw new IOException("File/directory ancestor conflict: " + path);
-                directories.add(key);
-            } else {
-                if (directories.contains(key)) throw new IOException("File/directory ancestor conflict: " + path);
-                files.add(key);
-            }
-        }
-    }
-
-    private static String portableKey(String path) { return Normalizer.normalize(path, Normalizer.Form.NFC).toLowerCase(Locale.ROOT); }
     private static void checkCompressionRatio(ZipEntry entry, double maximum) throws IOException {
         if (entry.getSize() < 0 || entry.getCompressedSize() < 0 ||
                 (entry.getSize() > 0 && entry.getSize() / (double) Math.max(1L, entry.getCompressedSize()) > maximum)) throw new IOException("ZIP compression ratio limit exceeded: " + entry.getName());
@@ -768,12 +1165,19 @@ public final class BackupEngine {
         if (Thread.currentThread().isInterrupted() || cancelled.getAsBoolean()) throw new InterruptedIOException("Backup operation cancelled");
     }
 
-    /** Portable glob: single star matches a segment; double star matches any path. */
+    /**
+     * Portable glob: a single star matches within one path segment, a double star matches any path,
+     * a question mark matches one character. Everything else is literal and case-sensitive. A pattern
+     * without any wildcard that names a directory also selects everything below it, and one trailing
+     * slash is ignored, so "world" and "world/" mean the same as "world/**".
+     */
     private static List<Pattern> compileGlobs(List<String> patterns) throws IOException {
         List<Pattern> compiled = new ArrayList<>();
-        for (String glob : patterns) {
-            if (glob == null || glob.isBlank() || glob.startsWith("/") || glob.indexOf('\\') >= 0 || glob.indexOf(':') >= 0 ||
-                    Arrays.asList(glob.split("/", -1)).contains("..")) throw new IOException("Invalid relative glob: " + glob);
+        for (String original : patterns) {
+            if (original == null || original.isBlank() || original.startsWith("/") || original.indexOf('\\') >= 0 ||
+                    Arrays.asList(original.split("/", -1)).contains("..")) throw new IOException("Invalid relative glob: " + original);
+            String glob = original.endsWith("/") && original.length() > 1 ? original.substring(0, original.length() - 1) : original;
+            boolean literal = glob.indexOf('*') < 0 && glob.indexOf('?') < 0;
             StringBuilder regex = new StringBuilder("^");
             for (int i = 0; i < glob.length(); i++) {
                 char ch = glob.charAt(i);
@@ -786,6 +1190,7 @@ public final class BackupEngine {
                 } else if (ch == '?') regex.append("[^/]");
                 else regex.append(Pattern.quote(String.valueOf(ch)));
             }
+            if (literal) regex.append("(?:/.*)?");
             regex.append('$');
             compiled.add(Pattern.compile(regex.toString()));
         }

@@ -4,7 +4,6 @@ package com.vaultbackup.plugin;
 import com.vaultbackup.core.BackupEngine;
 import com.vaultbackup.core.BackupRecord;
 import com.vaultbackup.restore.RestoreCoordinator;
-import org.bukkit.ChatColor;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.command.CommandSender;
@@ -27,9 +26,20 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 
-/** Bukkit is used only on the primary server thread; archive/helper I/O uses one bounded worker. */
+/**
+ * Bukkit is used only on the primary server thread; archive/helper I/O uses one bounded worker.
+ * This class uses only API that Spigot and Paper share unchanged. Whatever the two projects
+ * recommend differently (text, commands, items, save and stop handling) is behind ServerPlatform.
+ */
 public final class VaultBackupPlugin extends JavaPlugin implements Listener {
+    /** Oldest Minecraft version; equals api-version in plugin.yml, which makes older servers refuse the plugin. */
+    static final String MINIMUM_MINECRAFT = "26.2";
+    /** Newest Minecraft version this release was built against and checked with. */
+    static final String VERIFIED_MINECRAFT = "26.3";
+    /** How many changed-while-copied files are named in the log for one backup. */
+    private static final int UNSTABLE_LOG_LIMIT = 20;
     private volatile PluginSettings settings;
+    private ServerPlatform platform;
     private BackupEngine engine;
     private RestoreCoordinator restores;
     private BackupMenus menus;
@@ -37,6 +47,7 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
     private ExecutorService io;
     private BukkitTask automaticTask;
     private BukkitTask restorePollTask;
+    private long automaticIntervalMinutes;
     private final AtomicBoolean restorePolling = new AtomicBoolean();
     private volatile RestoreCoordinator.Status restoreStatus;
     private volatile boolean restoreStatusUncertain;
@@ -57,8 +68,8 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         try {
             saveDefaultConfig();
             settings = PluginSettings.read(getDataFolder().toPath().resolve("config.yml"));
+            platform = ServerPlatform.detect(this);
             if (!supported()) { getServer().getPluginManager().disablePlugin(this); return; }
-            ServerLifecycle.configureLanguage(language());
             // An absent state directory cannot contain a restore journal or guard, so failing to
             // create it is a configuration problem: disable the plugin, do not stop the server.
             prepareStateDirectory();
@@ -77,29 +88,27 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
                 getServer().getPluginManager().disablePlugin(this);
                 return;
             }
+            if (restores.inheritedRootGuard()) getLogger().info(text("startup.reloaded"));
             restores.startupFailure().ifPresent(message -> {
-                tell(Bukkit.getConsoleSender(), text("startup.restorefailed"), false);
+                tell(Bukkit.getConsoleSender(), text("startup.stalecancelled"), false);
                 getLogger().warning(text("job.diagnostic", message));
             });
             restores.consumeVerifiedReceipt().ifPresent(receipt -> tell(Bukkit.getConsoleSender(),
                     "\n========================================\n" + text("startup.success", receipt.backupId(), receipt.jobId(),
                             receipt.completedAt(), receipt.rollbackDirectory()) + "\n========================================", true));
             restoreGuardStartupFailure = false;
-            ServerLifecycle.verifyCompatibility();
             engine = new BackupEngine(settings.options());
             installHelper();
             io = Executors.newSingleThreadExecutor(r -> { Thread t = new Thread(r, "VaultBackup-IO"); t.setDaemon(true); return t; });
             notifier = new DiscordNotifier(getLogger());
             menus = new BackupMenus(this);
-            BackupCommands commands = new BackupCommands(this);
-            Objects.requireNonNull(getCommand("backup")).setExecutor(commands);
-            Objects.requireNonNull(getCommand("backup")).setTabCompleter(commands);
+            platform.registerCommands(new CommandActions(this));
             getServer().getPluginManager().registerEvents(menus, this);
             getServer().getPluginManager().registerEvents(this, this);
-            refresh(null, null);
+            refresh(null, true, null);
             reschedule();
             restorePollTask = getServer().getScheduler().runTaskTimer(this, this::pollRestoreStatus, 40L, 40L);
-            getLogger().info(text("startup.enabled"));
+            getLogger().info(text("startup.enabled", version(), platform.serverName(), platform.minecraftVersion()));
         } catch (Exception error) {
             tell(Bukkit.getConsoleSender(), text("startup.failed"), false);
             getLogger().log(Level.SEVERE, text("startup.failed"), error);
@@ -111,19 +120,25 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    /**
+     * The plugin uses only public server API, so it is not tied to one exact server build.
+     * Too-old servers are refused (they already refuse the plugin through api-version), regionized
+     * servers are refused, and anything newer or unknown runs with a clear notice that it is untested.
+     */
     private boolean supported() {
-        String version = ServerVersions.minecraftVersion(Bukkit.getBukkitVersion());
-        if (!(version.equals("26.2") || version.equals("26.3"))) {
-            getLogger().severe(text("startup.minecraft", Bukkit.getBukkitVersion())); return false;
-        }
         if (Runtime.version().feature() < 25) { getLogger().severe(text("startup.java")); return false; }
-        try { Class.forName("io.papermc.paper.threadedregions.RegionizedServer");
-            getLogger().severe(text("startup.folia")); return false;
-        } catch (ClassNotFoundException expected) { /* Paper's region scheduler API alone is not a Folia test. */ }
-        String name = Bukkit.getName().toLowerCase(Locale.ROOT);
-        if (!(name.equals("paper") || name.equals("purpur") || name.equals("spigot"))) {
-            getLogger().severe(text("startup.server", Bukkit.getName())); return false;
+        if (platform.regionized()) { getLogger().severe(text("startup.folia")); return false; }
+        String version = platform.minecraftVersion();
+        if (version.isEmpty()) {
+            getLogger().warning(text("startup.versionunknown", Bukkit.getBukkitVersion(), VERIFIED_MINECRAFT));
+        } else if (BukkitPlatform.compareVersions(version, MINIMUM_MINECRAFT) < 0) {
+            getLogger().severe(text("startup.minecraft", MINIMUM_MINECRAFT, version)); return false;
+        } else if (BukkitPlatform.compareVersions(version, VERIFIED_MINECRAFT) > 0) {
+            getLogger().warning(text("startup.untested", version, VERIFIED_MINECRAFT));
         }
+        String name = platform.serverName().toLowerCase(Locale.ROOT);
+        if (!Set.of("paper", "purpur", "spigot", "craftbukkit").contains(name))
+            getLogger().warning(text("startup.server", platform.serverName()));
         return true;
     }
 
@@ -172,20 +187,35 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
 
     @Override public void onDisable() {
         stopping = true;
-        // Record entry into the server shutdown path, not proof that every save has finished.
-        // Plugin disable/reload does not write this marker; the helper also requires actual JVM exit.
-        if (restores != null && ServerLifecycle.isStopping()) {
-            try { restores.noteNormalShutdown(); }
-            catch (IOException error) { getLogger().log(Level.SEVERE, text("restore.shutdownfailed"), error); }
-        }
+        noteShutdown();
         cancelled.set(true);
         if (automaticTask != null) automaticTask.cancel();
         if (restorePollTask != null) restorePollTask.cancel();
         if (menus != null) menus.closeAll();
         restoreAutosave();
         if (io != null) io.shutdownNow();
+        if (notifier != null) notifier.close();
         // The reservation survives normal shutdown; the helper still waits for actual JVM exit.
         // Never release the lifetime guard, extract archives, or swap server directories here.
+    }
+
+    /**
+     * Records authenticated stop intent for a waiting restore reservation. It is never proof that
+     * every save has finished; the helper also requires the actual JVM exit.
+     * Paper reports whether the server is stopping, so a reload or unload leaves no marker there.
+     * Spigot has no such API: the marker then says only that the plugin was disabled, and the
+     * helper accepts it solely for a JVM that exits shortly afterwards.
+     */
+    private void noteShutdown() {
+        if (restores == null || platform == null) return;
+        try {
+            ServerPlatform.StopEvidence evidence = platform.stopEvidence();
+            if (evidence == ServerPlatform.StopEvidence.NOT_STOPPING) return;
+            restores.noteNormalShutdown(evidence == ServerPlatform.StopEvidence.STOPPING
+                    ? RestoreCoordinator.ShutdownEvidence.SERVER_STOPPING : RestoreCoordinator.ShutdownEvidence.PLUGIN_DISABLED);
+        } catch (IOException | RuntimeException | LinkageError error) {
+            getLogger().log(Level.SEVERE, text("restore.shutdownfailed"), error);
+        }
     }
 
     @EventHandler public void worldLoaded(WorldLoadEvent event) {
@@ -196,13 +226,15 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
                 cancelled.set(true); getLogger().warning(text("world.outside", world.getName())); return;
             }
         } catch (IOException error) { cancelled.set(true); return; }
+        // Keep the new world from writing region files while they may be copied. It is not saved
+        // now: a save would rewrite files of every world underneath the running copy.
         autosave.putIfAbsent(world.getUID(), world.isAutoSave());
         world.setAutoSave(false);
-        try { ServerLifecycle.flushAll(); }
-        catch (Exception error) { cancelled.set(true); getLogger().log(Level.WARNING, text("job.failed", text("job.worldsave")), error); }
     }
 
     PluginSettings settings() { return settings; }
+    ServerPlatform platform() { return platform; }
+    String version() { return platform == null ? "" : platform.pluginVersion(); }
     BackupMenus menus() { return menus; }
     List<BackupRecord> backups() { return catalogue; }
     boolean busy() { return busy.get(); }
@@ -243,12 +275,21 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         tell(sender, text("permission.denied", action), false); return false;
     }
     void tell(CommandSender sender, String message, boolean success) {
-        if (sender == null) { getLogger().info(message); return; }
+        if (sender == null || platform == null) {
+            if (success) getLogger().info(message); else getLogger().warning(message);
+            return;
+        }
         // Some server console implementations split multiline text and reset formatting.
         // Color every separately delivered line so verified success/failure stays visible.
-        for (String line : message.split("\\R", -1)) {
-            sender.sendMessage(ChatColor.GOLD + "[VaultBackup] " + (success ? ChatColor.GREEN : ChatColor.RED) + line);
-        }
+        for (String line : message.split("\\R", -1)) platform.send(sender, success, line);
+    }
+    /**
+     * Tells administrators who are online about a problem nobody asked about, such as a failed
+     * automatic backup, which would otherwise only reach the server log. Primary thread only.
+     */
+    private void notifyAdministrators(String message) {
+        for (Player player : Bukkit.getOnlinePlayers())
+            if (player.hasPermission("vaultbackup.notify")) tell(player, message, false);
     }
     private void main(Runnable runnable) {
         if (stopping || !isEnabled()) return;
@@ -264,7 +305,9 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
     private void reportFailure(CommandSender sender, String context, Exception error) {
         String message = text("job.failed", text(context));
         getLogger().log(Level.WARNING, message, error);
-        main(() -> tell(sender, message, false));
+        // The console already has the log entry above; an unattended job additionally reaches online administrators.
+        if (sender == null) main(() -> notifyAdministrators(message));
+        else main(() -> tell(sender, message, false));
         if (notifier != null) notifier.send(settings, message);
     }
     private static String safeError(Exception error) {
@@ -289,15 +332,17 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
                 autosave.put(world.getUID(), world.isAutoSave());
                 world.setAutoSave(false);
             }
-            Bukkit.savePlayers();
-            ServerLifecycle.flushAll();
+            platform.saveAll();
         } catch (Exception error) { restoreAutosave(); finish(); reportFailure(sender,"job.worldsave",error); return; }
         tell(sender, text("backup.saved"), true);
         PluginSettings jobSettings = settings;
         submit(() -> {
             try {
-                BackupRecord record = engine.createBackup(label, this::isCancelled, p -> progress = p);
+                List<String> unstable = new ArrayList<>();
+                BackupRecord record = engine.createBackup(label, this::isCancelled, p -> progress = p,
+                        path -> { if (unstable.size() < UNSTABLE_LOG_LIMIT) unstable.add(path); });
                 main(this::restoreAutosave);
+                reportUnstable(sender, record, unstable);
                 try {
                     engine.retain(jobSettings.retentionCount() == 0 ? Integer.MAX_VALUE : jobSettings.retentionCount(), jobSettings.retentionBytes() == 0 ? Long.MAX_VALUE : jobSettings.retentionBytes(), restores.protectedBackupIds(), this::isCancelled, p -> progress = p);
                 } catch (Exception error) { reportFailure(sender, "job.retention", error); }
@@ -308,6 +353,16 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             } catch (Exception error) { reportFailure(sender, "job.backup", error); }
             finally { main(() -> { restoreAutosave(); finish(); }); }
         });
+    }
+
+    /** Files that kept changing while copied are in the archive as last read; say so instead of implying a clean copy. */
+    private void reportUnstable(CommandSender sender, BackupRecord record, List<String> named) {
+        if (record.unstableEntries() == 0) return;
+        String summary = text("backup.unstable", record.unstableEntries());
+        getLogger().warning(summary);
+        for (String path : named) getLogger().warning(text("backup.unstablefile", path));
+        if (record.unstableEntries() > named.size()) getLogger().warning(text("backup.unstablemore", record.unstableEntries() - named.size()));
+        if (sender != null) main(() -> tell(sender, summary, false));
     }
 
     private void reportBackupOutcome(CommandSender sender, BackupRecord created, PluginSettings jobSettings) {
@@ -353,7 +408,11 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         catalogue = List.copyOf(revalidate ? engine.revalidateBackups(this::isCancelled, p -> progress = p) : engine.listBackups());
         freeSpace = Files.getFileStore(settings.backupDirectory()).getUsableSpace();
     }
-    void refresh(CommandSender sender, Runnable after) {
+    /**
+     * @param revalidate true to re-read every archive (startup, /backup verify, the GUI refresh button);
+     *                   false to verify only archives that are new or changed since they were last verified
+     */
+    void refresh(CommandSender sender, boolean revalidate, Runnable after) {
         if (sender != null && !allowed(sender, "list")) return;
         if (busy()) {
             // Read-only navigation remains available while the I/O worker owns a mutation.
@@ -362,7 +421,7 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             return;
         }
         if (!begin(sender, "operation.catalogue")) return;
-        submit(() -> { try { updateCatalogue(true); main(() -> { if (after != null) after.run(); }); }
+        submit(() -> { try { updateCatalogue(revalidate); main(() -> { if (after != null) after.run(); }); }
             catch (Exception error) { reportFailure(sender, "job.list", error); }
             finally { main(this::finish); } });
     }
@@ -533,7 +592,7 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             }
             // An already committed helper retains the language stored in its immutable job.
             if (!reserved) restores.setLanguage(candidate.language().equals("en_US") ? "en" : "ja");
-            settings = candidate; engine = candidateEngine; ServerLifecycle.configureLanguage(language()); reschedule();
+            settings = candidate; engine = candidateEngine; reschedule();
             tell(sender,key == null ? text("settings.reloaded") : text("settings.updated", key),true);
         } catch (Exception error) { tell(sender,text("settings.rejected", safeError(error)),false); }
     }
@@ -546,17 +605,28 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
                 current.discordEnabled(), current.webhook(), candidate.language()));
     }
 
+    /**
+     * The interval is wall-clock time. Scheduler ticks stretch when the server lags, so the task
+     * only looks at the clock once a second instead of counting ticks to the next backup.
+     */
     private void reschedule() {
-        if (automaticTask != null) automaticTask.cancel();
-        nextAutomatic = null;
-        if (!settings.automatic()) return;
-        long ticks = Math.multiplyExact(settings.intervalMinutes(),1200L);
-        nextAutomatic = Instant.now().plusSeconds(settings.intervalMinutes()*60);
+        if (!settings.automatic()) {
+            if (automaticTask != null) automaticTask.cancel();
+            automaticTask = null; nextAutomatic = null; automaticIntervalMinutes = 0;
+            return;
+        }
+        // Reloading unrelated settings must not push the next automatic backup further away.
+        if (automaticTask == null || automaticIntervalMinutes != settings.intervalMinutes() || nextAutomatic == null)
+            nextAutomatic = Instant.now().plusSeconds(Math.multiplyExact(settings.intervalMinutes(), 60L));
+        automaticIntervalMinutes = settings.intervalMinutes();
+        if (automaticTask != null) return;
         automaticTask = getServer().getScheduler().runTaskTimer(this, () -> {
-            nextAutomatic = Instant.now().plusSeconds(settings.intervalMinutes()*60);
+            Instant due = nextAutomatic;
+            if (due == null || Instant.now().isBefore(due)) return;
+            nextAutomatic = Instant.now().plusSeconds(Math.multiplyExact(settings.intervalMinutes(), 60L));
             if (busy() || restoreReserved()) { getLogger().info(text("automatic.skipped", operation())); return; }
             create(null,"automatic");
-        },ticks,ticks);
+        },20L,20L);
     }
     void status(CommandSender sender) {
         if (!allowed(sender,"status")) return;

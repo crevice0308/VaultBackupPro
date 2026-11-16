@@ -14,7 +14,7 @@ public final class RestoreSafetyTest {
     private static int checks;
     private static Path helperJar;
     public static void main(String[] args)throws Exception {
-        if(args.length>0 && args[0].equals("--parent")){parent(Path.of(args[1]),Path.of(args[2]));return;}
+        if(args.length>0 && args[0].equals("--parent")){parent(Path.of(args[1]),Path.of(args[2]),args.length>3?args[3]:"SERVER_STOPPING",args.length>4?args[4]:"exit");return;}
         if(args.length>0 && args[0].equals("--gate")){holdGate(Path.of(args[1]));return;}
         if(args.length>0 && args[0].equals("--sleeper")){Thread.sleep(60000);return;}
         if(args.length>0 && args[0].equals("--startup-probe")) {
@@ -37,6 +37,8 @@ public final class RestoreSafetyTest {
             confirmationRaceTest(temp.resolve("confirm-cancel-race"));
             deadHelperTest(temp.resolve("dead-helper"));
             killedParentTest(temp.resolve("killed-parent"));
+            disabledPluginTest(temp.resolve("plugin-disabled"));
+            reloadedPluginTest(temp.resolve("plugin-reloaded"));
             integration(temp.resolve("success"),false);
             integration(temp.resolve("rollback"),true);
             rollbackJournalFailureTest(temp.resolve("rollback-journal"),"ORIGINAL_MOVED",false,false);
@@ -259,7 +261,11 @@ public final class RestoreSafetyTest {
         for(String kind:List.of("stage","rollback","failed"))p.setProperty(kind,root.resolveSibling(root.getFileName()+".vaultbackup-"+kind+"-"+id).toString());
         RestoreFiles.write(dir.resolve("job.properties"),p);Properties active=new Properties();active.setProperty("jobId",id);active.setProperty("backupId","test");RestoreFiles.write(state.resolve("active-restore.properties"),active);RestoreFiles.status(dir,"COMMITTED","fixture");Properties report=new Properties();report.setProperty("jobFile",dir.resolve("job.properties").toString());return report;
     }
-    private static void parent(Path fixture,Path jar)throws Exception {
+    /**
+     * A stand-in for the server JVM. {@code evidence} is what its plugin knew when it was disabled;
+     * {@code mode} is what the JVM does afterwards: exit, keep running until told, or load a second plugin instance.
+     */
+    private static void parent(Path fixture,Path jar,String evidence,String mode)throws Exception {
         Path root=fixture.resolve("server"),backups=fixture.resolve("backups"),state=fixture.resolve("state"),archive=backups.resolve("snapshot.zip");
         RestoreCoordinator coordinator=new RestoreCoordinator(root,backups,state,jar,"ja");
         RestoreCoordinator.LaunchResult result=reserveAndReport(coordinator,archive,fixture.resolve("ready.properties"));
@@ -269,8 +275,26 @@ public final class RestoreSafetyTest {
             if(Files.exists(fixture.resolve("cancel-again.request")) && !Files.exists(fixture.resolve("cancelled2.properties")))cancelAndReport(coordinator,result.jobId(),fixture.resolve("cancelled2.properties"));
             Thread.sleep(30);
         }
-        coordinator.noteNormalShutdown();
-        Files.createFile(fixture.resolve("disable-observed"));Thread.sleep(800);
+        if(evidence.equals("SERVER_STOPPING"))coordinator.noteNormalShutdown();
+        else if(!evidence.equals("NONE"))coordinator.noteNormalShutdown(RestoreCoordinator.ShutdownEvidence.valueOf(evidence));
+        if(mode.equals("reload")) {
+            // /reload: the old instance was disabled above, and the same JVM now enables a new one.
+            var reloaded=RestoreCoordinator.start(root,backups,state,jar,"ja",message -> {});
+            Properties report=new Properties();report.setProperty("disposition",reloaded.disposition().name());
+            report.setProperty("inherited",Boolean.toString(reloaded.coordinator()!=null && reloaded.coordinator().inheritedRootGuard()));
+            report.setProperty("finding",reloaded.coordinator()==null?"":reloaded.coordinator().startupFinding().name());
+            report.setProperty("activeCleared",Boolean.toString(!Files.exists(state.resolve("active-restore.properties"))));
+            report.setProperty("message",reloaded.message());
+            if(reloaded.disposition()==RestoreCoordinator.StartupDisposition.READY) {
+                // The reloaded plugin is fully usable: it can reserve, and cancel, again.
+                var again=reloaded.coordinator().reserve("snapshot",archive,RestoreFiles.sha(archive),Duration.ofMinutes(2));
+                report.setProperty("reservedAgain",Boolean.toString(reloaded.coordinator().cancel(again.token())));
+            }
+            RestoreFiles.write(fixture.resolve("reloaded.properties"),report);
+        }
+        Files.createFile(fixture.resolve("disable-observed"));
+        if(mode.equals("linger"))while(!Files.exists(fixture.resolve("exit.request")))Thread.sleep(30);
+        Thread.sleep(800);
         // No coordinator.close(), no restore in onDisable. Actual process exit releases guard.
     }
     private static RestoreCoordinator.LaunchResult reserveAndReport(RestoreCoordinator c,Path archive,Path report)throws Exception {
@@ -380,6 +404,65 @@ public final class RestoreSafetyTest {
         awaitConfirmedDead(dir,job,Duration.ofSeconds(10),"crash helper exit",f);
         RestoreCoordinator restarted=new RestoreCoordinator(root,f.resolve("backups"),f.resolve("state"),helperJar);check(restarted.startupFailure().isPresent(),"safe failed crash reservation is reported on restart");check(restarted.status().isEmpty(),"dead failed reservation is durably disarmed before startup cleanup");
         Process retry=helper(file,"--manual","--i-confirm-server-stopped");check(retry.waitFor(10,java.util.concurrent.TimeUnit.SECONDS) && retry.exitValue()==3,"startup-disarmed failed job cannot be manually resumed later");
+    }
+    /**
+     * Spigot has no API that says whether the server is stopping. Its marker therefore only says
+     * "the plugin was disabled", and counts as a stop only when the JVM exits right afterwards.
+     */
+    private static void disabledPluginTest(Path base)throws Exception {
+        Path f=base.resolve("stopped"),root=fixture(f);Process parent=spawn("--parent",f.toString(),helperJar.toString(),"PLUGIN_DISABLED");
+        try {
+            Path file=ready(f,parent),dir=file.getParent();Properties job=RestoreFiles.load(file);
+            Files.createFile(f.resolve("stop.request"));check(parent.waitFor(10,java.util.concurrent.TimeUnit.SECONDS),"the JVM exits after its plugin was disabled");
+            await(()->statusEquals(dir,"SUCCESS"),Duration.ofSeconds(20),"restore after disable and exit",null,f);
+            check(RestoreFiles.load(dir.resolve("normal-stop.properties")).getProperty("evidence").equals("PLUGIN_DISABLED"),"the marker records that only the disable was known");
+            check(Files.readString(root.resolve("world/level.dat")).equals("BACKUP") && Files.readString(Path.of(job.getProperty("rollback")).resolve("world/level.dat")).equals("ORIGINAL"),
+                    "a plugin disabled right before the JVM exit is an ordinary server stop");
+        } finally {if(parent.isAlive()){parent.destroyForcibly();parent.waitFor();}}
+        // Disabled long before the JVM died (a plugin manager, a failed reload, then a crash): not a server stop.
+        Path g=base.resolve("lingering"),lingeringRoot=fixture(g);parent=spawn("--parent",g.toString(),helperJar.toString(),"PLUGIN_DISABLED","linger");
+        try {
+            Path file=ready(g,parent),dir=file.getParent();Properties job=RestoreFiles.load(file);
+            Files.createFile(g.resolve("stop.request"));await(()->Files.exists(g.resolve("disable-observed")),Duration.ofSeconds(10),"plugin disable",parent,g);
+            // The authentic marker is aged instead of waiting out the real grace period.
+            Path marker=dir.resolve("normal-stop.properties");Properties aged=RestoreFiles.load(marker);
+            aged.setProperty("requestedAt",Instant.now().minus(RestoreJobState.DISABLED_EXIT_GRACE).minusSeconds(60).toString());
+            aged.setProperty("authentication",RestoreFiles.hmac(job.getProperty("nonce"),String.join("\n",aged.getProperty("jobId"),aged.getProperty("parentPid"),aged.getProperty("parentStartedAt"),aged.getProperty("requestedAt"),aged.getProperty("evidence"))));
+            RestoreFiles.write(marker,aged);
+            Thread.sleep(500);check(parent.isAlive() && statusEquals(dir,"WAITING_FOR_MANUAL_STOP") && Files.readString(lingeringRoot.resolve("world/level.dat")).equals("ORIGINAL"),"nothing happens while the JVM is still running");
+            Files.createFile(g.resolve("exit.request"));check(parent.waitFor(10,java.util.concurrent.TimeUnit.SECONDS),"the lingering JVM exits");
+            await(()->statusEquals(dir,"FAILED_BEFORE_SWAP"),Duration.ofSeconds(10),"refusal of a stale disable marker",null,g);
+            check(!Files.exists(Path.of(job.getProperty("stage"))) && !Files.exists(Path.of(job.getProperty("rollback"))) && Files.readString(lingeringRoot.resolve("world/level.dat")).equals("ORIGINAL"),
+                    "a JVM that died long after its plugin was disabled is not restored over");
+            check(RestoreFiles.load(dir.resolve("status.properties")).getProperty("message").contains("disabled"),"the journal says why");
+        } finally {if(parent.isAlive()){parent.destroyForcibly();parent.waitFor();}}
+        // No marker at all (Paper reports that the server is not stopping): the exit is treated as a crash.
+        Path h=base.resolve("not-stopping"),quietRoot=fixture(h);parent=spawn("--parent",h.toString(),helperJar.toString(),"NONE");
+        try {
+            Path file=ready(h,parent),dir=file.getParent();
+            Files.createFile(h.resolve("stop.request"));check(parent.waitFor(10,java.util.concurrent.TimeUnit.SECONDS),"the JVM exits without a marker");
+            await(()->statusEquals(dir,"FAILED_BEFORE_SWAP"),Duration.ofSeconds(10),"refusal without a marker",null,h);
+            check(!Files.exists(dir.resolve("normal-stop.properties")) && Files.readString(quietRoot.resolve("world/level.dat")).equals("ORIGINAL"),"a disable that is known not to be a stop authorises nothing");
+        } finally {if(parent.isAlive()){parent.destroyForcibly();parent.waitFor();}}
+    }
+    /** /reload used to stop the whole server. The reloaded plugin now keeps running, and the old reservation is withdrawn. */
+    private static void reloadedPluginTest(Path base)throws Exception {
+        for(String evidence:List.of("PLUGIN_DISABLED","NONE")) {
+            Path f=base.resolve(evidence.toLowerCase(Locale.ROOT)),root=fixture(f);Process parent=spawn("--parent",f.toString(),helperJar.toString(),evidence,"reload");
+            try {
+                Path file=ready(f,parent),dir=file.getParent();Properties job=RestoreFiles.load(file);
+                Files.createFile(f.resolve("stop.request"));await(()->Files.exists(f.resolve("reloaded.properties")),Duration.ofSeconds(20),"reloaded instance",parent,f);
+                Properties report=RestoreFiles.load(f.resolve("reloaded.properties"));
+                check(report.getProperty("disposition").equals("READY") && report.getProperty("inherited").equals("true"),"the second plugin instance starts on the guard its JVM already holds ("+evidence+"): "+report.getProperty("message"));
+                check(report.getProperty("finding").equals("STALE_RESERVATION_CANCELLED") && report.getProperty("activeCleared").equals("true"),"the reservation of the disabled instance is withdrawn and reported");
+                check("true".equals(report.getProperty("reservedAgain")),"the reloaded instance can reserve and cancel again");
+                check(RestoreJobState.acknowledged(dir,job) && RestoreFiles.load(dir.resolve("cancel-ack.properties")).getProperty("source").equals("HELPER"),"the waiting helper itself acknowledged the withdrawal");
+                check(parent.waitFor(10,java.util.concurrent.TimeUnit.SECONDS),"the reloaded JVM exits later");Thread.sleep(600);
+                check(statusEquals(dir,"CANCELLED") && Files.readString(root.resolve("world/level.dat")).equals("ORIGINAL") && !Files.exists(Path.of(job.getProperty("stage"))) && !Files.exists(Path.of(job.getProperty("rollback"))),
+                        "a reservation made before a reload is never applied when the JVM exits");
+                Process retry=helper(file,"--manual","--i-confirm-server-stopped");check(retry.waitFor(10,java.util.concurrent.TimeUnit.SECONDS) && retry.exitValue()==3,"and cannot be resumed by hand");
+            } finally {if(parent.isAlive()){parent.destroyForcibly();parent.waitFor();}}
+        }
     }
     private static Process helper(Path job,String...flags)throws IOException {
         List<String> command=new ArrayList<>();command.add(Path.of(System.getProperty("java.home"),"bin",System.getProperty("os.name","").toLowerCase(Locale.ROOT).contains("win")?"java.exe":"java").toString());command.add("-jar");command.add(helperJar.toString());command.add("--job");command.add(job.toString());command.addAll(List.of(flags));return new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.INHERIT).start();

@@ -27,6 +27,7 @@ public final class BackupEngineTest {
     private static final String ZERO_HASH = "0".repeat(64);
 
     public static void main(String[] args) throws Exception {
+        if (args.length == 2 && args[0].equals("--locale-child")) { localeChild(Path.of(args[1])); return; }
         fixture = Files.createTempDirectory("vaultbackup-core-test-");
         try {
             roundTripAndExclusions();
@@ -42,6 +43,15 @@ public final class BackupEngineTest {
             storeLockIsFailFast();
             privateFilesAndAbandonedPartCleanup();
             verificationIsNotRepeatedForUnchangedArchives();
+            liveTreeChangesAreTolerated();
+            unsafeChangesDuringCopyAreRefused();
+            everyProblemIsReportedAtOnce();
+            selectionRules();
+            interruptedChangesAreSwept();
+            rejectedArchivesAreVisibleAndDeletable();
+            craftedArchivesStayWithinMemory();
+            spaceIsCheckedBeforeAndWhileWriting();
+            fileNamesNeedARepresentableEncoding();
             System.out.println("PASS BackupEngineTest (" + checks + " checks)");
         } finally {
             try (var paths = Files.walk(fixture)) {
@@ -106,18 +116,8 @@ public final class BackupEngineTest {
         Files.writeString(engine.serverRoot().resolve("live.dat"), "old content");
         expectIOException(() -> engine.createBackup("cancel", () -> true, ignored -> {}), "early cancellation");
         equal(engine.listBackups().size(), 0, "cancel publishes no archive");
-        AtomicBoolean modified = new AtomicBoolean();
-        expectIOException(() -> engine.createBackup("changing", () -> false, message -> {
-            if (message.equals("Backing up live.dat") && modified.compareAndSet(false, true)) {
-                try {
-                    Files.writeString(engine.serverRoot().resolve("live.dat"), "new content much larger");
-                    Files.setLastModifiedTime(engine.serverRoot().resolve("live.dat"), FileTime.from(Instant.now().plusSeconds(5)));
-                } catch (IOException e) { throw new UncheckedIOException(e); }
-            }
-        }), "source mutation rejected");
-        equal(engine.listBackups().size(), 0, "mutation publishes no archive");
         try (var files = Files.list(engine.backupDirectory())) {
-            check(files.noneMatch(p -> p.toString().endsWith(".part") || p.toString().endsWith(".zip")), "failed archive cleaned");
+            check(files.noneMatch(p -> p.toString().endsWith(".part") || p.toString().endsWith(".zip")), "cancelled archive cleaned");
         }
         AtomicBoolean cancel = new AtomicBoolean();
         expectIOException(() -> engine.createBackup("midcancel", cancel::get, message -> {
@@ -227,8 +227,6 @@ public final class BackupEngineTest {
         BackupRecord good = corruptEngine.createBackup("good");
         BackupRecord corrupt = corruptEngine.createBackup("will-corrupt");
         Files.write(corrupt.zipPath(), new byte[]{1,2,3});
-        try { corruptEngine.delete(corrupt.id(), Set.of()); throw new AssertionError("corrupt deletion accepted"); }
-        catch (IOException expected) { check(!(expected instanceof BackupDeletionRefusedException), "corrupt target remains IO diagnostic"); }
         corruptEngine.delete(good.id(), Set.of());
         equal(corruptEngine.listBackups().size(), 0, "manual deletion ignores corrupt siblings and may leave zero");
         check(Files.exists(corrupt.zipPath()) && Files.exists(corrupt.metadataPath()), "manual delete does not remove other corrupt files");
@@ -403,8 +401,15 @@ public final class BackupEngineTest {
         AtomicInteger reads = new AtomicInteger();
         Consumer<String> counter = message -> { if (message.startsWith("Verifying ")) reads.incrementAndGet(); };
         // Each archive has exactly two manifest entries, so a full read reports two "Verifying" steps.
-        equal(engine.listBackups(() -> false, counter).size(), 2, "first listing returns both archives");
-        equal(reads.getAndSet(0), 4, "archives not yet verified by this engine are read in full");
+        equal(engine.listBackups(() -> false, counter).size(), 2, "the creating engine lists both archives");
+        equal(reads.getAndSet(0), 0, "an archive verified while it was created is not read again by its engine");
+        BackupEngine restarted = new BackupEngine(engine.options());
+        equal(restarted.listBackups(() -> false, counter).size(), 2, "first listing of another engine returns both archives");
+        equal(reads.getAndSet(0), 4, "archives not yet verified by an engine are read in full");
+        BackupRecord extra = engine.createBackup("extra");
+        new BackupEngine(engine.options()).delete(extra.id(), Set.of());
+        equal(engine.listBackups(() -> false, counter).size(), 2, "a deletion by another engine is seen");
+        equal(reads.getAndSet(0), 0, "and needs no archive to be read again");
         equal(engine.listBackups(() -> false, counter).size(), 2, "routine listing keeps unchanged archives");
         equal(reads.getAndSet(0), 0, "routine listing does not re-read unchanged archives");
         equal(engine.retain(10, Long.MAX_VALUE, Set.of(), () -> false, counter).size(), 0, "retention within limits removes nothing");
@@ -447,6 +452,461 @@ public final class BackupEngineTest {
         expectIOException(() -> engine.verify(first.id()), "explicit verify rejects the corrupt archive");
         engine.delete(second.id(), Set.of());
         equal(engine.listBackups().size(), 0, "deleted archive is not served from cache");
+    }
+
+    private static Map<String, byte[]> archived(BackupRecord record) throws IOException {
+        Map<String, byte[]> contents = new TreeMap<>();
+        try (ZipFile zip = new ZipFile(record.zipPath().toFile(), StandardCharsets.UTF_8)) {
+            for (ZipEntry entry : Collections.list(zip.entries()))
+                if (!entry.isDirectory() && !entry.getName().equals(BackupEngine.MANIFEST_PATH)) contents.put(entry.getName(), zip.getInputStream(entry).readAllBytes());
+        }
+        return contents;
+    }
+    private static String text(Map<String, byte[]> contents, String name) {
+        return contents.containsKey(name) ? new String(contents.get(name), StandardCharsets.UTF_8) : null;
+    }
+    private static void replaceByRename(Path file, String content) throws IOException {
+        Path temporary = file.resolveSibling(file.getFileName() + ".new");
+        Files.writeString(temporary, content);
+        Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+    }
+    private static void rewriteInPlace(Path file, String content) {
+        try {
+            Files.writeString(file, content);
+            Files.setLastModifiedTime(file, FileTime.from(Instant.now().plusSeconds(1 + (long) (Math.random() * 1000))));
+        } catch (IOException e) { throw new UncheckedIOException(e); }
+    }
+
+    /**
+     * What a running server does to its own tree during a backup: player data and level.dat are
+     * replaced by rename, plugins rewrite and create files, temporary files vanish. Before 1.3.0
+     * each of these aborted the whole backup.
+     */
+    private static void liveTreeChangesAreTolerated() throws Exception {
+        BackupEngine engine = engine("live");
+        Path root = engine.serverRoot();
+        Files.createDirectories(root.resolve("world/playerdata"));
+        Files.createDirectories(root.resolve("plugins/Foo"));
+        Files.writeString(root.resolve("a-first.txt"), "first");
+        Files.writeString(root.resolve("world/level.dat"), "level-v1");
+        Files.writeString(root.resolve("world/playerdata/p1.dat"), "p1-v1");
+        Files.writeString(root.resolve("plugins/Foo/config.yml"), "config-v1");
+        Files.writeString(root.resolve("plugins/Foo/temp.tmp"), "temporary");
+        Files.writeString(root.resolve("usercache.json"), "[v1]");
+        Files.writeString(root.resolve("zz-busy.db"), "busy-0");
+        Set<String> done = new HashSet<>();
+        AtomicInteger busyLooks = new AtomicInteger();
+        engine.afterReadProbe = name -> {
+            // A plugin rewrites its file exactly while it is being read: the first look is unstable.
+            if (name.equals("plugins/Foo/config.yml") && done.add("config")) rewriteInPlace(root.resolve(name), "config-v2-longer");
+            // A database another plugin never stops writing: every look is unstable.
+            if (name.equals("zz-busy.db")) rewriteInPlace(root.resolve(name), "busy-" + busyLooks.incrementAndGet());
+        };
+        List<String> unstable = new ArrayList<>();
+        BackupRecord record = engine.createBackup("live", () -> false, message -> {
+            if (!message.equals("Backing up a-first.txt") || !done.add("server")) return;
+            try {
+                // The server's periodic save, a player joining and a plugin cleaning up, all after the scan.
+                replaceByRename(root.resolve("world/level.dat"), "level-v2");
+                replaceByRename(root.resolve("world/playerdata/p1.dat"), "p1-v2");
+                Files.writeString(root.resolve("world/playerdata/p2.dat"), "joined later");
+                replaceByRename(root.resolve("usercache.json"), "[v2]");
+                Files.writeString(root.resolve("created-in-root.txt"), "new");
+                Files.delete(root.resolve("plugins/Foo/temp.tmp"));
+            } catch (IOException e) { throw new UncheckedIOException(e); }
+        }, unstable::add);
+        engine.afterReadProbe = null;
+        Map<String, byte[]> contents = archived(record);
+        equal(text(contents, "world/level.dat"), "level-v2", "a file replaced by rename is archived as one complete version");
+        equal(text(contents, "world/playerdata/p1.dat"), "p1-v2", "replaced player data is archived");
+        equal(text(contents, "usercache.json"), "[v2]", "replaced root file is archived");
+        equal(text(contents, "plugins/Foo/config.yml"), "config-v2-longer", "a file rewritten during its copy is read again until it is one version");
+        check(!contents.containsKey("plugins/Foo/temp.tmp"), "a file deleted after the scan is skipped, not an error");
+        check(!contents.containsKey("world/playerdata/p2.dat") && !contents.containsKey("created-in-root.txt"), "files created after the scan belong to the next backup");
+        equal(unstable, List.of("zz-busy.db"), "only the file that never settled is reported");
+        check(busyLooks.get() >= 2 && text(contents, "zz-busy.db").startsWith("busy-"), "a never-settling file is retried, then archived as last read");
+        equal(record.unstableEntries(), 1, "the count of unsettled files is returned");
+        equal(engine.verify(record.id()).unstableEntries(), 1, "and stored with the backup");
+        equal(new BackupEngine(engine.options()).listBackups().get(0).unstableEntries(), 1, "and read back by another engine");
+        equal(HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(record.zipPath()))), record.sha256(),
+                "the digest taken while writing is the digest of the file on disk");
+        equal(BackupEngine.readManifest(record).size(), record.entryCount(), "manifest lists exactly what was archived");
+
+        // Files too large to read twice: rewritten in place is reported, replaced by rename is not.
+        BackupEngine large = engine("live-large");
+        byte[] big = new byte[9 * 1024 * 1024]; Arrays.fill(big, (byte) 7);
+        Files.write(large.serverRoot().resolve("in-place.bin"), big);
+        Files.write(large.serverRoot().resolve("replaced.bin"), big);
+        Files.writeString(large.serverRoot().resolve("small.txt"), "small");
+        large.afterReadProbe = name -> {
+            try {
+                if (name.equals("in-place.bin")) {
+                    try (FileChannel channel = FileChannel.open(large.serverRoot().resolve(name), StandardOpenOption.WRITE)) {
+                        channel.write(java.nio.ByteBuffer.wrap(new byte[]{1, 2, 3}), 4096);
+                    }
+                    Files.setLastModifiedTime(large.serverRoot().resolve(name), FileTime.from(Instant.now().plusSeconds(60)));
+                }
+                if (name.equals("replaced.bin")) {
+                    Path temporary = large.serverRoot().resolve("replaced.bin.new");
+                    Files.write(temporary, new byte[]{9});
+                    Files.move(temporary, large.serverRoot().resolve(name), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                }
+            } catch (IOException e) { throw new UncheckedIOException(e); }
+        };
+        List<String> largeUnstable = new ArrayList<>();
+        BackupRecord largeRecord = large.createBackup("large", () -> false, ignored -> {}, largeUnstable::add);
+        large.afterReadProbe = null;
+        equal(largeUnstable, List.of("in-place.bin"), "a large file written in place is reported; one replaced while open is complete");
+        check(Arrays.equals(archived(largeRecord).get("replaced.bin"), big), "the version that was open is archived in full");
+
+        // A mass deletion (arena reset) must not stall the backup while autosave is off.
+        BackupEngine reset = engine("live-reset");
+        Files.createDirectories(reset.serverRoot().resolve("arena"));
+        for (int i = 0; i < 400; i++) Files.writeString(reset.serverRoot().resolve("arena/chunk-" + i), "x");
+        Files.writeString(reset.serverRoot().resolve("zz-keep.txt"), "keep");
+        AtomicBoolean deleted = new AtomicBoolean();
+        long started = System.nanoTime();
+        BackupRecord afterReset = reset.createBackup("reset", () -> false, message -> {
+            if (message.startsWith("Backing up arena/") && deleted.compareAndSet(false, true)) {
+                try (var files = Files.list(reset.serverRoot().resolve("arena"))) { for (Path file : files.toList()) Files.delete(file); }
+                catch (IOException e) { throw new UncheckedIOException(e); }
+            }
+        }, ignored -> {});
+        long millis = (System.nanoTime() - started) / 1_000_000;
+        check(millis < 15_000, "400 vanished files do not each cost a wait (took " + millis + " ms)");
+        equal(archived(afterReset).keySet(), Set.of("zz-keep.txt"), "vanished files are skipped and the rest is archived");
+    }
+
+    /** The one thing a change may never do is redirect the copy outside the server root. */
+    private static void unsafeChangesDuringCopyAreRefused() throws Exception {
+        BackupEngine engine = engine("live-unsafe");
+        Path root = engine.serverRoot();
+        Files.createDirectories(root.resolve("world/datapacks/builder"));
+        Files.writeString(root.resolve("a-first.txt"), "first");
+        Files.writeString(root.resolve("world/datapacks/builder/a.txt"), "inside");
+        Path outside = Files.createDirectory(fixture.resolve("live-unsafe-outside"));
+        Files.writeString(outside.resolve("a.txt"), "SECRET outside the server root");
+        AtomicBoolean swapped = new AtomicBoolean();
+        expectIOException(() -> engine.createBackup("swap", () -> false, message -> {
+            if (message.equals("Backing up a-first.txt") && swapped.compareAndSet(false, true)) {
+                try {
+                    Files.move(root.resolve("world/datapacks/builder"), root.resolve("world/datapacks/builder.real"));
+                    Files.createSymbolicLink(root.resolve("world/datapacks/builder"), outside);
+                } catch (IOException e) { throw new UncheckedIOException(e); }
+            }
+        }, ignored -> {}), "a directory swapped for a symlink during the copy is refused");
+        equal(engine.listBackups().size(), 0, "nothing is published after a refused copy");
+        try (var files = Files.list(engine.backupDirectory())) {
+            check(files.noneMatch(p -> p.toString().endsWith(".part") || p.toString().endsWith(".zip")), "refused archive cleaned");
+        }
+        Files.delete(root.resolve("world/datapacks/builder"));
+        Files.move(root.resolve("world/datapacks/builder.real"), root.resolve("world/datapacks/builder"));
+        AtomicBoolean replaced = new AtomicBoolean();
+        expectIOException(() -> engine.createBackup("filelink", () -> false, message -> {
+            if (message.equals("Backing up a-first.txt") && replaced.compareAndSet(false, true)) {
+                try {
+                    Files.delete(root.resolve("world/datapacks/builder/a.txt"));
+                    Files.createSymbolicLink(root.resolve("world/datapacks/builder/a.txt"), outside.resolve("a.txt"));
+                } catch (IOException e) { throw new UncheckedIOException(e); }
+            }
+        }, ignored -> {}), "a file swapped for a symlink during the copy is refused");
+        equal(engine.listBackups().size(), 0, "nothing is published after a refused file");
+    }
+
+    private static void everyProblemIsReportedAtOnce() throws Exception {
+        BackupEngine engine = engine("problems");
+        Path root = engine.serverRoot();
+        Files.createDirectories(root.resolve("plugins/Twin"));
+        Files.writeString(root.resolve("ok.txt"), "ok");
+        Files.writeString(root.resolve("plugins/dump:2026.txt"), "colon");
+        Files.writeString(root.resolve("plugins/aux.yml"), "device name");
+        Files.createSymbolicLink(root.resolve("plugins/linked.yml"), root.resolve("ok.txt"));
+        Files.createSymbolicLink(root.resolve("linked-directory"), root.resolve("plugins"));
+        boolean caseSensitive = true;
+        try { Files.createDirectories(root.resolve("plugins/twin")); Files.writeString(root.resolve("plugins/twin/x"), "x"); }
+        catch (IOException insensitive) { caseSensitive = false; }
+        caseSensitive &= !Files.isSameFile(root.resolve("plugins/Twin"), root.resolve("plugins/twin"));
+        try { engine.createBackup("problems"); throw new AssertionError("unbackupable paths accepted"); }
+        catch (BackupEngine.SourceRefusedException refused) {
+            List<String> problems = refused.problems();
+            for (String expected : List.of("plugins/dump:2026.txt", "plugins/aux.yml", "plugins/linked.yml", "linked-directory"))
+                check(problems.stream().anyMatch(problem -> problem.startsWith(expected + ": ")), "one refusal names " + expected);
+            if (caseSensitive) check(problems.stream().anyMatch(problem -> problem.startsWith("plugins/twin: ") || problem.startsWith("plugins/Twin: ")), "one refusal names the case twin");
+            equal(refused.total(), caseSensitive ? 5 : 4, "every problem is counted");
+            check(refused.getMessage().contains("backup.exclude"), "the refusal says what to do");
+        }
+        equal(engine.listBackups().size(), 0, "nothing is published while problems exist");
+        // Every one of them can be excluded, including the name with a colon.
+        BackupEngine excluding = new BackupEngine(options(engine.options(), List.of("**"),
+                List.of("plugins/dump:2026.txt", "plugins/aux.yml", "plugins/linked.yml", "linked-directory", "plugins/twin"), 1000, 1 << 20, 1 << 24, 10000));
+        equal(archived(excluding.createBackup("excluded")).keySet(), Set.of("ok.txt"), "excluded problems no longer block the backup");
+
+        // More problems than are listed individually are still all counted.
+        BackupEngine many = engine("problems-many");
+        Files.writeString(many.serverRoot().resolve("ok.txt"), "ok");
+        for (int i = 0; i < 60; i++) Files.createSymbolicLink(many.serverRoot().resolve("link-" + i), many.serverRoot().resolve("ok.txt"));
+        try { many.createBackup("many"); throw new AssertionError("symlinks accepted"); }
+        catch (BackupEngine.SourceRefusedException refused) {
+            equal(refused.total(), 60, "all sixty problems counted");
+            equal(refused.problems().size(), 50, "fifty named");
+            check(refused.getMessage().contains("10 more"), "the rest summarised");
+        }
+
+        // An unreadable directory can be excluded (it used to abort before exclusions were consulted).
+        BackupEngine unreadable = engine("problems-unreadable");
+        Path locked = Files.createDirectories(unreadable.serverRoot().resolve("lost+found"));
+        Files.writeString(unreadable.serverRoot().resolve("ok.txt"), "ok");
+        if (Files.getFileStore(locked).supportsFileAttributeView(PosixFileAttributeView.class)) {
+            Files.setPosixFilePermissions(locked, PosixFilePermissions.fromString("---------"));
+            boolean enforced;
+            try (var stream = Files.newDirectoryStream(locked)) { enforced = false; } catch (IOException denied) { enforced = true; }
+            if (enforced) { // Not when the harness runs as a user that ignores permission bits.
+                try { unreadable.createBackup("unreadable"); throw new AssertionError("unreadable directory accepted"); }
+                catch (BackupEngine.SourceRefusedException refused) { check(refused.problems().get(0).startsWith("lost+found: "), "unreadable directory is named"); }
+                BackupEngine skipping = new BackupEngine(options(unreadable.options(), List.of("**"), List.of("lost+found/**"), 1000, 1 << 20, 1 << 24, 10000));
+                equal(archived(skipping.createBackup("skipped")).keySet(), Set.of("ok.txt"), "an unreadable directory can be excluded");
+            }
+            Files.setPosixFilePermissions(locked, PosixFilePermissions.fromString("rwx------"));
+        }
+    }
+
+    private static void selectionRules() throws Exception {
+        BackupEngine base = engine("selection");
+        Path root = base.serverRoot();
+        Files.createDirectories(root.resolve("world/region"));
+        Files.createDirectories(root.resolve("plugins/Foo/logs"));
+        Files.writeString(root.resolve("world/level.dat"), "level");
+        Files.writeString(root.resolve("world/region/r.0.0.mca"), "region");
+        Files.writeString(root.resolve("plugins/Foo/config.yml"), "config");
+        Files.writeString(root.resolve("plugins/Foo/debug.log"), "log");
+        Files.writeString(root.resolve("plugins/Foo/logs/latest.log"), "log");
+        Files.writeString(root.resolve("server.log"), "log");
+        // A pattern that selects nothing must not publish an empty archive that retention would keep instead of real ones.
+        for (String nothing : List.of("World/**", "./world/**", "worlds", "*.nothing")) {
+            BackupEngine engine = new BackupEngine(options(base.options(), List.of(nothing), List.of(), 1000, 1 << 20, 1 << 24, 10000));
+            expectIOException(() -> engine.createBackup("empty"), "include that matches no file is refused: " + nothing);
+            equal(engine.listBackups().size(), 0, "no empty archive for " + nothing);
+        }
+        // A directory named without wildcards means the directory and everything below it.
+        for (String directory : List.of("world", "world/", "world/**")) {
+            BackupEngine engine = new BackupEngine(options(base.options(), List.of(directory), List.of(), 1000, 1 << 20, 1 << 24, 10000));
+            BackupRecord record = engine.createBackup("directory");
+            equal(archived(record).keySet(), Set.of("world/level.dat", "world/region/r.0.0.mca"), "include " + directory + " selects the directory tree");
+            engine.delete(record.id(), Set.of());
+        }
+        BackupEngine wildcard = new BackupEngine(options(base.options(), List.of("plugins/*"), List.of(), 1000, 1 << 20, 1 << 24, 10000));
+        expectIOException(() -> wildcard.createBackup("wildcard"), "a wildcard pattern keeps its exact meaning: plugins/* matches files directly in plugins only");
+        BackupEngine excluded = new BackupEngine(options(base.options(), List.of("**"), List.of("**/*.log", "plugins/Foo/logs"), 1000, 1 << 20, 1 << 24, 10000));
+        equal(archived(excluded.createBackup("excluded")).keySet(), Set.of("world/level.dat", "world/region/r.0.0.mca", "plugins/Foo/config.yml"),
+                "**/*.log excludes logs at every depth, and a directory name excludes its tree");
+        equal(BackupEngine.unsupportedGlobSyntax(List.of("**", "world/**", "*.{log,txt}", "[a-z]*", "!keep", "./world/**", "plain")),
+                List.of("*.{log,txt}", "[a-z]*", "!keep", "./world/**"), "glob syntax that is not implemented is identified for a warning");
+        for (String invalid : List.of("/absolute", "a/../b", "a\\b", " "))
+            expectIOException(() -> new BackupEngine(options(base.options(), List.of(invalid), List.of(), 1000, 1 << 20, 1 << 24, 10000)), "invalid glob rejected: " + invalid);
+
+        // A file that compresses better than the configured ratio is refused with its name, not as an unverifiable archive later.
+        BackupEngine ratio = engine("selection-ratio");
+        Files.write(ratio.serverRoot().resolve("zeros.bin"), new byte[4 * 1024 * 1024]);
+        Files.writeString(ratio.serverRoot().resolve("ok.txt"), "ok");
+        BackupEngine strict = new BackupEngine(options(ratio.options(), List.of("**"), List.of(), 1000, 1 << 24, 1 << 26, 100));
+        try { strict.createBackup("ratio"); throw new AssertionError("over-compressible file accepted"); }
+        catch (IOException refused) { check(refused.getMessage().contains("zeros.bin") && refused.getMessage().contains("max-compression-ratio"), "the refusal names the file and the limit"); }
+        equal(strict.listBackups().size(), 0, "nothing is published");
+        equal(ratio.createBackup("default-ratio").entryCount(), 2, "the default ratio accepts the same file");
+    }
+
+    /** A JVM stop or an interrupt between two filesystem steps must not leave files nobody ever removes. */
+    private static void interruptedChangesAreSwept() throws Exception {
+        BackupEngine engine = engine("sweep");
+        Files.writeString(engine.serverRoot().resolve("x"), "data");
+        BackupRecord kept = engine.createBackup("kept");
+        BackupRecord victim = engine.createBackup("victim");
+        byte[] zipBytes = Files.readAllBytes(victim.zipPath());
+        // Deletion interrupted after the commit marker was withdrawn: the archive is still there, unlisted.
+        Files.move(victim.metadataPath(), engine.backupDirectory().resolve("." + victim.id() + ".properties.part"));
+        equal(engine.listBackups().stream().map(BackupRecord::id).toList(), List.of(kept.id()), "a withdrawn backup is not listed");
+        engine.retain(10, Long.MAX_VALUE, Set.of(), () -> false, ignored -> {});
+        check(!Files.exists(victim.zipPath()) && !Files.exists(engine.backupDirectory().resolve("." + victim.id() + ".properties.part")),
+                "the next store change completes an interrupted deletion");
+        // Publication interrupted between the two renames looks the same and is cleaned the same way.
+        String id = "20260101T000000000Z-0123456789ab";
+        Files.write(engine.backupDirectory().resolve(id + ".zip"), zipBytes);
+        Files.writeString(engine.backupDirectory().resolve("." + id + ".properties.part"), "partial");
+        // An archive somebody copied in without a sidecar has no such part file and is never touched.
+        String foreign = "20260102T000000000Z-0123456789ab";
+        Files.write(engine.backupDirectory().resolve(foreign + ".zip"), zipBytes);
+        BackupRecord next = engine.createBackup("next");
+        check(!Files.exists(engine.backupDirectory().resolve(id + ".zip")), "an archive whose publication was interrupted is removed");
+        check(Files.exists(engine.backupDirectory().resolve(foreign + ".zip")), "an archive without any trace of this engine is left alone");
+        equal(engine.listBackups().size(), 2, "the store lists the two complete backups");
+        check(engine.rejectedArchives().containsKey(foreign), "but it is reported as unusable");
+        engine.delete(foreign, Set.of());
+        check(!Files.exists(engine.backupDirectory().resolve(foreign + ".zip")) && engine.listBackups().size() == 2 && engine.rejectedArchives().isEmpty(),
+                "and can be deleted by its ID");
+        engine.delete(next.id(), Set.of());
+        try (var files = Files.list(engine.backupDirectory())) {
+            equal(files.map(p -> p.getFileName().toString()).filter(name -> !name.equals(".vaultbackup.lock")).sorted().toList(),
+                    List.of(kept.id() + ".properties", kept.id() + ".zip"), "nothing but the remaining backup is left in the store");
+        }
+    }
+
+    private static void rejectedArchivesAreVisibleAndDeletable() throws Exception {
+        BackupEngine engine = engine("rejected");
+        Files.writeString(engine.serverRoot().resolve("a"), "a");
+        Files.writeString(engine.serverRoot().resolve("b"), "b");
+        BackupRecord good = engine.createBackup("good");
+        BackupRecord broken = engine.createBackup("broken");
+        check(engine.rejectedArchives().isEmpty(), "a healthy store rejects nothing");
+        byte[] bytes = Files.readAllBytes(broken.zipPath()); bytes[bytes.length / 2] ^= 1;
+        Files.write(broken.zipPath(), bytes);
+        equal(engine.listBackups().stream().map(BackupRecord::id).toList(), List.of(good.id()), "a corrupt archive is not listed");
+        equal(engine.rejectedArchives().keySet(), Set.of(broken.id()), "but it is reported");
+        check(engine.rejectedArchives().get(broken.id()).contains("SHA-256"), "with the reason: " + engine.rejectedArchives().get(broken.id()));
+        expectRefusal(() -> engine.delete(broken.id(), Set.of(broken.id())), BackupDeletionRefusedException.Reason.RESTORE_PROTECTED, broken.id());
+        engine.delete(broken.id(), Set.of());
+        check(!Files.exists(broken.zipPath()) && !Files.exists(broken.metadataPath()), "a corrupt archive can be deleted by its ID");
+        equal(engine.listBackups().size(), 1, "the good archive is untouched");
+        check(engine.rejectedArchives().isEmpty(), "nothing is rejected afterwards");
+        // Lowering a limit no longer makes archives vanish without a trace.
+        BackupEngine tighter = new BackupEngine(options(engine.options(), List.of("**"), List.of(), 1, 1 << 20, 1 << 24, 10000));
+        equal(tighter.listBackups().size(), 0, "an archive beyond the configured limits is not listed");
+        check(tighter.rejectedArchives().get(good.id()).contains("limit"), "and the reason names the limits");
+        tighter.delete(good.id(), Set.of());
+        check(!Files.exists(good.zipPath()), "it can still be deleted");
+        expectIOException(() -> engine.delete(good.id(), Set.of()), "deleting what does not exist is an error");
+    }
+
+    /** Archives another local user could place in the store must not be able to take the server's heap. */
+    private static void craftedArchivesStayWithinMemory() throws Exception {
+        BackupEngine engine = engine("crafted-memory");
+        String id = "20260101T000000000Z-0123456789ab";
+        Path zip = engine.backupDirectory().resolve(id + ".zip"), metadata = engine.backupDirectory().resolve(id + ".properties");
+        // 400 entries, each 2,000 one-letter directories deep: every check passes, but keeping every
+        // ancestor prefix as a string needed gigabytes.
+        StringBuilder deep = new StringBuilder();
+        for (int i = 0; i < 2000; i++) deep.append("d/");
+        List<Part> parts = new ArrayList<>();
+        StringBuilder manifest = new StringBuilder();
+        for (int i = 0; i < 400; i++) {
+            String name = deep + "f" + i;
+            parts.add(new Part(name, new byte[0]));
+            manifest.append(line("F", name, 0, hash(new byte[0])));
+        }
+        crafted(zip, metadata, parts, manifest.toString(), 0, 400);
+        Runtime runtime = Runtime.getRuntime();
+        System.gc();
+        long before = runtime.totalMemory() - runtime.freeMemory();
+        equal(engine.verify(id).entryCount(), 400, "a deep but valid archive verifies");
+        long grown = runtime.totalMemory() - runtime.freeMemory() - before;
+        check(grown < 256L * 1024 * 1024, "path bookkeeping stays proportional to the number of components (grew " + grown / (1024 * 1024) + " MiB)");
+        // More implied directories than entries allow is refused instead of tracked.
+        BackupOptions few = options(engine.options(), List.of(), List.of(), 400, 1 << 20, 1 << 24, 10000);
+        crafted(zip, metadata, parts, manifest.toString(), 0, 400);
+        expectIOException(() -> BackupEngine.verifyArchive(zip, metadata, few, () -> false, ignored -> {}), "an unbounded directory structure is refused");
+
+        // An end record that claims a huge central directory inside a sparse file: refused before java.util.zip allocates for it.
+        crafted(zip, metadata, List.of(new Part("a", new byte[]{1})), line("F", "a", 1, hash(new byte[]{1})), 1, 1);
+        byte[] small = Files.readAllBytes(zip);
+        long claimed = 1L << 31;
+        try (FileChannel channel = FileChannel.open(zip, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
+            java.nio.ByteBuffer end = java.nio.ByteBuffer.allocate(22).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            end.putInt(0x06054b50).putShort((short) 0).putShort((short) 0).putShort((short) 1).putShort((short) 1)
+                    .putInt((int) (claimed - 64)).putInt(0).putShort((short) 0).flip();
+            channel.write(end, claimed); // a hole of 2 GiB in front: almost nothing is allocated on disk
+        }
+        try {
+            ZipDirectory.requireWithin(zip, 100, 1 << 20);
+            throw new AssertionError("oversized central directory accepted");
+        } catch (IOException refused) { checks++; }
+        Files.write(zip, small);
+        // The layout this project writes is the only one read: an archive comment moves the end record.
+        try (ZipOutputStream output = new ZipOutputStream(Files.newOutputStream(zip))) {
+            output.setComment("comment");
+            output.putNextEntry(new ZipEntry("a")); output.write(1); output.closeEntry();
+        }
+        expectIOException(() -> ZipDirectory.read(zip), "an archive comment is not the accepted layout");
+        Files.write(zip, new byte[]{1, 2, 3});
+        expectIOException(() -> ZipDirectory.read(zip), "a file too short to be a ZIP is refused");
+        // What the engine writes is accepted, also beyond the 16-bit entry count.
+        BackupEngine many = engine("crafted-many");
+        for (int i = 0; i < 70; i++) Files.createDirectories(many.serverRoot().resolve("d" + i));
+        for (int i = 0; i < 70; i++) for (int j = 0; j < 950; j++) Files.createFile(many.serverRoot().resolve("d" + i + "/f" + j));
+        BackupRecord large = many.createBackup("many");
+        equal(ZipDirectory.read(large.zipPath()).entries(), 70L * 950 + 70 + 1, "the ZIP64 end record of a large archive is read correctly");
+        equal(many.verify(large.id()).entryCount(), 70 * 950 + 70, "and the archive verifies");
+    }
+
+    private static void spaceIsCheckedBeforeAndWhileWriting() throws Exception {
+        BackupEngine engine = engine("space");
+        byte[] random = new byte[40 * 1024 * 1024]; new Random(7).nextBytes(random);
+        Files.write(engine.serverRoot().resolve("big.bin"), random);
+        Files.writeString(engine.serverRoot().resolve("small.txt"), "small");
+        // Not even the reserve is free: refused before anything is written.
+        engine.usableSpaceProbe = () -> 16L * 1024 * 1024;
+        try { engine.createBackup("full"); throw new AssertionError("backup started without free space"); }
+        catch (BackupEngine.InsufficientSpaceException full) { check(full.availableBytes() == 16L * 1024 * 1024 && full.neededBytes() > full.availableBytes(), "the refusal carries both numbers"); }
+        try (var files = Files.list(engine.backupDirectory())) { check(files.noneMatch(p -> p.toString().endsWith(".part")), "nothing was written"); }
+        // Enough at the start, but the disk fills while the archive grows: stopped at the reserve, not at zero.
+        AtomicInteger looks = new AtomicInteger();
+        engine.usableSpaceProbe = () -> looks.incrementAndGet() == 1 ? Long.MAX_VALUE / 4 : 1024;
+        try { engine.createBackup("filling"); throw new AssertionError("backup ran the disk down"); }
+        catch (BackupEngine.InsufficientSpaceException full) { check(looks.get() >= 2, "free space is looked at again while writing"); }
+        try (var files = Files.list(engine.backupDirectory())) { check(files.noneMatch(p -> p.toString().endsWith(".part") || p.toString().endsWith(".zip")), "the partial archive is removed"); }
+        engine.usableSpaceProbe = null;
+        BackupRecord record = engine.createBackup("fits");
+        // The estimate follows how the previous archive compressed: incompressible data needs about its own size.
+        engine.usableSpaceProbe = () -> record.compressedBytes() / 2;
+        try { engine.createBackup("half"); throw new AssertionError("estimate ignored the previous archive"); }
+        catch (BackupEngine.InsufficientSpaceException full) { check(full.neededBytes() > record.compressedBytes(), "the estimate is taken from the previous archive"); }
+        engine.usableSpaceProbe = null;
+        equal(engine.listBackups().size(), 1, "refused backups leave the store as it was");
+    }
+
+    /**
+     * A JVM started without a UTF-8 locale cannot represent non-ASCII file names. It used to archive
+     * them under replacement characters and report success. The check runs in a child JVM because the
+     * file-name encoding is fixed when a JVM starts.
+     */
+    private static void fileNamesNeedARepresentableEncoding() throws Exception {
+        Path base = Files.createDirectory(fixture.resolve("locale"));
+        Path root = Files.createDirectory(base.resolve("server"));
+        Files.writeString(root.resolve("ascii.txt"), "ascii");
+        boolean utf8 = "UTF-8".equalsIgnoreCase(System.getProperty("sun.jnu.encoding"));
+        if (utf8) {
+            Files.createDirectories(root.resolve("plugins/ワールド設定"));
+            Files.writeString(root.resolve("plugins/ワールド設定/設定.yml"), "日本語");
+            BackupEngine engine = new BackupEngine(BackupOptions.defaults(root, base.resolve("backups"), base.resolve("state")));
+            check(archived(engine.createBackup("utf8")).containsKey("plugins/ワールド設定/設定.yml"), "non-ASCII names are archived under their real names in a UTF-8 JVM");
+        }
+        if (!System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("linux")) return;
+        if (!utf8) { // The files must exist under their real UTF-8 names for the child to find.
+            Process make = new ProcessBuilder("sh", "-c", "mkdir -p \"$1/plugins/$(printf '\\343\\203\\257')\" && : > \"$1/plugins/$(printf '\\343\\203\\257')/$(printf '\\350\\250\\255').yml\"", "sh", root.toString()).inheritIO().start();
+            check(make.waitFor() == 0, "fixture with non-ASCII names created");
+        }
+        String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+        ProcessBuilder child = new ProcessBuilder(java, "-cp", System.getProperty("java.class.path"), BackupEngineTest.class.getName(), "--locale-child", base.toString());
+        child.environment().put("LC_ALL", "C");
+        child.environment().put("LANG", "C");
+        child.environment().remove("JAVA_TOOL_OPTIONS");
+        child.redirectErrorStream(true);
+        Process process = child.start();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        check(process.waitFor(60, TimeUnit.SECONDS) && process.exitValue() == 0, "child JVM without a UTF-8 locale: " + output);
+        check(output.contains("LOCALE-CHILD-OK"), "child completed its checks: " + output);
+    }
+
+    private static void localeChild(Path base) throws Exception {
+        if ("UTF-8".equalsIgnoreCase(System.getProperty("sun.jnu.encoding"))) { System.out.println("LOCALE-CHILD-OK (this platform always uses UTF-8 file names)"); return; }
+        BackupEngine engine = new BackupEngine(BackupOptions.defaults(base.resolve("server"), base.resolve("child-backups"), base.resolve("child-state")));
+        try { engine.createBackup("posix-locale"); throw new AssertionError("unrepresentable names archived"); }
+        catch (BackupEngine.SourceRefusedException refused) {
+            if (refused.problems().stream().noneMatch(problem -> problem.contains("UTF-8 locale"))) throw new AssertionError("refusal does not explain the locale: " + refused.problems());
+        }
+        if (!engine.listBackups().isEmpty()) throw new AssertionError("archive published with wrong names");
+        BackupEngine ascii = new BackupEngine(new BackupOptions(base.resolve("server"), base.resolve("child-backups"), base.resolve("child-state"),
+                List.of("**"), List.of("plugins/**"), 1000, 1 << 20, 1 << 24, 10000d, 6));
+        if (ascii.createBackup("ascii").entryCount() < 1) throw new AssertionError("ASCII names must still be backed up");
+        System.out.println("LOCALE-CHILD-OK");
     }
 
     private record Part(String name, byte[] data) { }
