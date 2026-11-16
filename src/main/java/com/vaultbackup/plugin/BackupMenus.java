@@ -50,6 +50,10 @@ final class BackupMenus implements Listener {
         // Another plugin may cancel the open event; a menu that is not on screen must not accept clicks.
         if (p.openInventory(menu.inventory) != null) open.put(p.getUniqueId(),menu);
     }
+    /** After a refresh that a menu button started: re-reading a large store takes minutes, and the list is not put over whatever the player does by then. */
+    private void listIfViewing(Player p, int page) {
+        if (p.isOnline() && open.containsKey(p.getUniqueId()) && menu(p.getOpenInventory().getTopInventory()) != null) openList(p,page);
+    }
     /** A menu button closed the menu and started work in the background; the list may be shown again when it is done. */
     void expectReturn(Player p) { returning.add(p.getUniqueId()); }
     void forgetReturn(Player p) { returning.remove(p.getUniqueId()); }
@@ -62,7 +66,7 @@ final class BackupMenus implements Listener {
         if (!access(p)) return;
         Menu m = make(p,t("menu.main"),27);
         m.put(10,Material.EMERALD_BLOCK,t("menu.create"),List.of(t("menu.create.save"),t("menu.create.async")),"create",who -> { who.closeInventory(); plugin.create(who,"manual"); });
-        m.put(12,Material.CHEST,t("menu.catalogue"),List.of(t("menu.catalogue.count",plugin.backups().size()),t("menu.catalogue.click")),"list",who -> plugin.refresh(who,false,() -> openList(who,0)));
+        m.put(12,Material.CHEST,t("menu.catalogue"),List.of(t("menu.catalogue.count",plugin.backups().size()),t("menu.catalogue.click")),"list",who -> plugin.refresh(who,false,() -> listIfViewing(who,0)));
         m.put(14,Material.CLOCK,t("menu.auto"),List.of(t("common.automatic",on(plugin.settings().automatic())),t("common.interval",plugin.settings().intervalMinutes())),"configure",this::openAutomatic);
         m.put(16,Material.COMPARATOR,t("menu.settings"),List.of(t("menu.settings.details"),t("menu.settings.validate")),"configure",this::openSettings);
         m.put(22,Material.PAPER,t("menu.status"),List.of(plugin.operation(),plugin.progress(),t("common.free",VaultBackupPlugin.humanBytes(plugin.freeSpace()))),"status",who -> { plugin.status(who); openStorage(who); });
@@ -95,7 +99,7 @@ final class BackupMenus implements Listener {
         }
         if (current>0) m.put(45,Material.ARROW,t("menu.previous"),List.of(),"list",who -> openList(who,current-1));
         m.put(48,Material.COMPASS,t("common.dashboard"),List.of(),"gui",this::openMain);
-        m.put(49,Material.SPYGLASS,t("menu.refresh"),List.of(t("menu.refresh.hint")),"list",who -> plugin.refresh(who,true,() -> openList(who,current)));
+        m.put(49,Material.SPYGLASS,t("menu.refresh"),List.of(t("menu.refresh.hint")),"list",who -> plugin.refresh(who,true,() -> listIfViewing(who,current)));
         if (current+1<pages) m.put(53,Material.ARROW,t("menu.next"),List.of(),"list",who -> openList(who,current+1));
         show(p,m);
     }

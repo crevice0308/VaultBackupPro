@@ -127,6 +127,11 @@ public final class DeleteWorkflowTest {
             PluginSettings settings=new PluginSettings(root,backup,state,helper,List.of("**"),List.of(),false,60,20,
                     Long.MAX_VALUE,6,100000,34359738368L,1099511627776L,2000,60,false,null,"en_US");
             Deque<Runnable> main=new ArrayDeque<>(); QueuedIO io=new QueuedIO();
+            // What the fixture server models of a real one. A command issued while another command is
+            // being executed is queued and runs only after the outer command has returned.
+            boolean[] primary={false},inCommand={false};
+            List<org.bukkit.World> worlds=new ArrayList<>();Deque<Runnable> nested=new ArrayDeque<>();List<String> dispatched=new ArrayList<>();
+            BukkitPlatform[] saving={null};
             BukkitScheduler scheduler=(BukkitScheduler)Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),
                     new Class<?>[]{BukkitScheduler.class},(p,m,a)->{
                         if(m.getName().equals("runTask") && a[1] instanceof Runnable task)main.add(task);
@@ -135,6 +140,15 @@ public final class DeleteWorkflowTest {
             Server server=(Server)Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),new Class<?>[]{Server.class},
                     (p,m,a)->switch(m.getName()) {
                         case "getScheduler" -> scheduler;
+                        case "isPrimaryThread" -> primary[0];
+                        case "getWorlds" -> worlds.isEmpty()?null:List.copyOf(worlds);
+                        case "getWorld" -> worlds.stream().filter(w->w.getUID().equals(a[0])).findFirst().orElse(null);
+                        case "dispatchCommand" -> {
+                            String issued=(String)a[1];dispatched.add((inCommand[0]?"nested:":"direct:")+issued);
+                            Runnable run=()->{if(issued.equals("minecraft:save-all flush"))for(org.bukkit.World w:worlds)saving[0].worldSaved(new org.bukkit.event.world.WorldSaveEvent(w));};
+                            if(inCommand[0])nested.add(run);else run.run();
+                            yield true;
+                        }
                         case "getLogger" -> java.util.logging.Logger.getLogger("VaultBackupFixture");
                         case "getName" -> "Spigot";
                         case "getVersion", "getBukkitVersion" -> "26.2-R0.1-SNAPSHOT";
@@ -365,7 +379,7 @@ public final class DeleteWorkflowTest {
             field(plugin,VaultBackupPlugin.class,"autosave",new java.util.LinkedHashSet<>());
             messages.clear();commands.onCommand(sender,null,"backup",new String[]{"create","immediate"});
             check(contains(messages,"Starting backup. Saving worlds"),"create immediately acknowledges before mandatory save");
-            check(!contains(messages,"Saving complete") && !contains(messages,"Backup created:"),"acceptance does not falsely claim saving or backup completion");
+            check(!contains(messages,"World save executed") && !contains(messages,"Backup created:"),"acceptance does not falsely claim saving or backup completion");
             drainMain(main);
             check(!busy.get() && io.queue.isEmpty(),"failed fixture save cannot enqueue compression or leave busy state");
             sourceCheck(pluginSource.indexOf("RestoreCoordinator.start(") < pluginSource.indexOf("engine = new BackupEngine(settings.options())")
@@ -411,6 +425,56 @@ public final class DeleteWorkflowTest {
             Files.writeString(links?realConfig:config,"language: [not, a, language]\n");
             messages.clear();commands.onCommand(sender,null,"backup",new String[]{"reload"});
             check(contains(messages,"Configuration rejected") && plugin.settings().intervalMinutes()==15,"an invalid file is rejected and the active settings stay");
+            // /backup create typed as a command, against a server model with one world.
+            boolean[] autosave={true};UUID worldId=UUID.randomUUID();
+            org.bukkit.World world=(org.bukkit.World)Proxy.newProxyInstance(DeleteWorkflowTest.class.getClassLoader(),new Class<?>[]{org.bukkit.World.class},(p,m,a)->switch(m.getName()) {
+                case "getUID" -> worldId;
+                case "getName" -> "world";
+                case "getWorldFolder" -> root.toFile();
+                case "isAutoSave" -> autosave[0];
+                case "setAutoSave" -> {autosave[0]=(Boolean)a[0];yield null;}
+                case "hashCode" -> System.identityHashCode(p);
+                case "equals" -> p==a[0];
+                case "toString" -> "fixture world";
+                default -> defaultValue(m.getReturnType());
+            });
+            SpigotPlatform live=new SpigotPlatform(plugin);field(plugin,VaultBackupPlugin.class,"platform",live);saving[0]=live;
+            worlds.add(world);primary[0]=true;
+            // The model: a save issued while a command is being executed has not run when the handler looks for it.
+            inCommand[0]=true;
+            try {live.saveAll();throw new AssertionError("a save that is still queued behind the running command was reported as done");}
+            catch(IOException unconfirmed) {checks++;}
+            finally {inCommand[0]=false;nested.clear();}
+            for(CommandSender issuer:List.of(sender,player)) {
+                dispatched.clear();messages.clear();logged.clear();
+                int stored=engine.listBackups().size();
+                inCommand[0]=true;commands.onCommand(issuer,null,"backup",new String[]{"create","typed"});inCommand[0]=false;
+                while(!nested.isEmpty())nested.removeFirst().run();
+                check(dispatched.isEmpty() && busy.get() && autosave[0] && contains(messages,"Starting backup"),"the command handler itself issues no save and reports none");
+                drainMain(main);
+                check(dispatched.equals(List.of("direct:minecraft:save-all flush")) && contains(messages,"World save executed") && io.queue.size()==1 && !autosave[0],
+                        "the save runs in a task of its own, is confirmed there, and world saving is suspended for the copy");
+                io.runOne();
+                check(!autosave[0] && busy.get(),"the worker changes no world setting itself");
+                main.removeFirst().run();
+                check(autosave[0] && busy.get(),"world saving is switched back on as soon as the server files have been read, before the archive is verified and reported");
+                drainMain(main);
+                check(!busy.get() && autosave[0] && contains(messages,"Backup created:") && engine.listBackups().stream().anyMatch(r->r.label().equals("typed")),"the backup typed as a command completes");
+                check(contains(logged,"[audit] "+issuer.getName()+": started a backup (label: typed)"),"who started the backup is logged");
+                // The console sees its own messages in the log; what a player was told is logged for them.
+                check(contains(logged,"Backup created:")==(issuer==player),"the result a player was told is in the server log as well");
+                check(stored>=0,"fixture");
+            }
+            // A restore reservation stays cancellable while a long catalogue job runs: a server stopped in the meantime would apply it.
+            field(plugin,VaultBackupPlugin.class,"armedJob","00000000-0000-4000-8000-000000000000");
+            messages.clear();commands.onCommand(sender,null,"backup",new String[]{"verify"});
+            check(io.queue.size()==1 && busy.get(),"a complete re-verification is queued");
+            commands.onCommand(sender,null,"backup",new String[]{"restore","cancel"});
+            check(contains(messages,"Stopping the running catalogue verification") && cancelled.get() && io.queue.size()==1,"the cancellation is accepted and the catalogue job is told to stop");
+            io.runOne();drainMain(main);
+            check(!contains(messages,"re-verified") && !contains(messages,"failed") && io.queue.size()==1 && busy.get(),"the stopped catalogue job reports neither success nor failure, and the cancellation follows by itself");
+            io.runOne();drainMain(main);
+            check(!busy.get() && !plugin.restoreReserved() && io.queue.isEmpty() && contains(messages,"Restore reservation cancelled"),"the reservation is cancelled without a second command");
             System.out.println("PASS DeleteWorkflowTest ("+checks+" executed checks; "+sourceChecks+" source-only GUI wiring checks; includes simulated Bukkit events, no real client or helper launch)");
         } finally {
             try(var paths=Files.walk(fixture)) { for(Path path:paths.sorted(Comparator.reverseOrder()).toList())Files.deleteIfExists(path); }

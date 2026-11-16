@@ -25,7 +25,7 @@ import java.util.UUID;
  * WorldSaveEvent, and a world that was not announced fails the save.
  */
 abstract class BukkitPlatform implements ServerPlatform, Listener {
-    /** The namespaced label cannot be shadowed by a commands.yml alias or another plugin's command. */
+    /** The namespaced label is not replaced by another plugin's command of the same name, nor by an alias for the plain one. */
     static final String SAVE_COMMAND = "minecraft:save-all flush";
 
     protected final VaultBackupPlugin plugin;

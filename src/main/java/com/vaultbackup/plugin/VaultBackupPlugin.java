@@ -42,6 +42,11 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
     private static final int REFUSED_SHOWN = 5;
     /** An automatic backup that is already due waits this long after enabling, so that it never runs during startup itself. */
     static final Duration AUTOMATIC_SETTLE = Duration.ofMinutes(2);
+    /**
+     * While worlds do not save, a server keeps every change in memory and unloads no chunk. The copy
+     * tolerates files that change, so saving is switched back on after this long whatever the copy does.
+     */
+    static final Duration AUTOSAVE_SUSPENSION_LIMIT = Duration.ofMinutes(30);
     private volatile PluginSettings settings;
     private ServerPlatform platform;
     private BackupEngine engine;
@@ -73,6 +78,10 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
     private final Set<UUID> autosave = new LinkedHashSet<>();
     /** True once the next automatic backup has been derived from the backups found in the store. */
     private boolean automaticAnchored;
+    /** Switches saving back on when a copy takes longer than {@link #AUTOSAVE_SUSPENSION_LIMIT}. */
+    private BukkitTask autosaveLimitTask;
+    /** Who asked to cancel the restore reservation while a catalogue job was running; served when that job ends. */
+    private CommandSender pendingRestoreCancel;
     private volatile boolean snapshotActive;
     private volatile String armedJob;
     private boolean restoreGuardStartupFailure;
@@ -371,8 +380,9 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         List<String> explanation = explain(error);
         String shown = explanation.isEmpty() ? message : message + "\n" + String.join("\n", explanation);
         // The console already has the log entry above; an unattended job additionally reaches online administrators.
-        if (sender == null) main(() -> notifyAdministrators(shown, null));
-        else main(() -> tell(sender, shown, false));
+        Runnable report = sender == null ? () -> notifyAdministrators(shown, null) : () -> tell(sender, shown, false);
+        // Said at once when already on the server thread: a remote console only receives what is sent before its command returns.
+        if (Bukkit.isPrimaryThread()) { if (!stopping) report.run(); } else main(report);
         if (notifier != null) notifier.send(settings, explanation.isEmpty() ? message : message + " " + explanation.get(0));
     }
     /** What the administrator can act on, in their language. The server log has the complete exception. */
@@ -402,17 +412,36 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
     private void submit(Runnable work) {
         try { io.execute(work); } catch (RejectedExecutionException error) { restoreAutosave(); finish(); }
     }
+    /** What a player or a remote console was told about a result is otherwise in nobody's log. */
+    private void record(CommandSender sender, String message, boolean success) {
+        if (sender == null || sender instanceof org.bukkit.command.ConsoleCommandSender) return; // both are in the log already
+        if (success) getLogger().info(message); else getLogger().warning(message);
+    }
 
     void create(CommandSender sender, String label) {
         if (sender != null && !allowed(sender, "create")) return;
         if (restoreReserved()) { tell(sender, text("backup.blocked"), false); return; }
         if (!begin(sender, "operation.create")) return;
+        boolean scheduled = false;
+        try {
+            audit(sender, "audit.create", label);
+            tell(sender, text("backup.starting"), true);
+            // A server runs a command that is issued from inside another command only after the outer
+            // one has returned. Saving from here would therefore check for a save that has not run yet
+            // whenever /backup create itself is the outer command. The save gets a task of its own.
+            getServer().getScheduler().runTask(this, () -> saveAndCopy(sender, label));
+            scheduled = true;
+        } catch (Exception | LinkageError error) { reportFailure(sender, "job.worldsave", error); }
+        finally { if (!scheduled) finish(); }
+    }
+
+    /** Server thread, outside any command. The plugin is "busy" since {@link #create}. */
+    private void saveAndCopy(CommandSender sender, String label) {
         // Whatever goes wrong below, including an Error from a server this was never tested with,
         // world saving is switched back on and the plugin does not stay "busy" for good.
         boolean handedOff = false;
         try {
-            audit(sender, "audit.create", label);
-            tell(sender, text("backup.starting"), true);
+            if (stopping) return;
             snapshotActive = true;
             for (World world : Bukkit.getWorlds()) {
                 if (!world.getWorldFolder().toPath().toRealPath().startsWith(settings.serverRoot()))
@@ -421,13 +450,21 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             }
             platform.saveAll();
             tell(sender, text("backup.saved"), true);
+            autosaveLimitTask = getServer().getScheduler().runTaskLater(this, () -> {
+                if (!snapshotActive) return;
+                getLogger().warning(text("backup.autosaveresumed", AUTOSAVE_SUSPENSION_LIMIT.toMinutes()));
+                restoreAutosave();
+            }, AUTOSAVE_SUSPENSION_LIMIT.toSeconds() * 20L);
             PluginSettings jobSettings = settings;
             BackupEngine jobEngine = engine;
             submit(() -> {
                 try {
                     List<String> unstable = new ArrayList<>();
-                    BackupRecord record = jobEngine.createBackup(label, this::isCancelled, p -> progress = p,
-                            path -> { if (unstable.size() < UNSTABLE_LOG_LIMIT) unstable.add(path); });
+                    BackupRecord record = jobEngine.createBackup(label, this::isCancelled, p -> {
+                        progress = p;
+                        // Nothing is read from the server tree any more: do not keep its changes in memory for the verification as well.
+                        if (BackupEngine.PHASE_VERIFYING_NEW_ARCHIVE.equals(p)) main(this::restoreAutosave);
+                    }, path -> { if (unstable.size() < UNSTABLE_LOG_LIMIT) unstable.add(path); });
                     main(this::restoreAutosave);
                     reportUnstable(sender, record, unstable);
                     try {
@@ -437,7 +474,7 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
                     // Reconcile the resulting store even after retention failure; never equate the
                     // earlier successful creation with a presently usable recovery point.
                     reportBackupOutcome(sender, record, jobSettings);
-                } catch (Exception | LinkageError error) {
+                } catch (Throwable error) {
                     // A server that stops while a backup runs interrupts it. That is not a failed backup to alert about.
                     if (stopping) getLogger().info(text("backup.interrupted"));
                     else reportFailure(sender, "job.backup", error);
@@ -477,7 +514,12 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         String outcome = retained ? text("backup.created",created.id(),humanBytes(created.compressedBytes()))
                 : text(removed ? "backup.retentionremoved" : "backup.unavailable",created.id());
         String summary = remaining.isEmpty() ? text("backup.retentionempty") : text("backup.retentioncount",remaining.size());
-        main(() -> { tell(sender,outcome,retained); tell(sender,summary,!remaining.isEmpty()); });
+        record(sender, outcome + " " + summary, retained);
+        main(() -> {
+            tell(sender,outcome,retained); tell(sender,summary,!remaining.isEmpty());
+            // Nobody watches an automatic backup. One that kept nothing must not pass unnoticed in the log.
+            if (sender == null && (!retained || remaining.isEmpty())) notifyAdministrators(outcome + "\n" + summary, null);
+        });
         if (notifier != null) notifier.send(jobSettings,outcome + " " + summary);
         try { freeSpace = Files.getFileStore(settings.backupDirectory()).getUsableSpace(); }
         catch (IOException error) { reportFailure(sender,"job.list",error); }
@@ -485,6 +527,7 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
 
     private void restoreAutosave() {
         snapshotActive = false;
+        if (autosaveLimitTask != null) { autosaveLimitTask.cancel(); autosaveLimitTask = null; }
         for (UUID id : autosave) {
             World world = Bukkit.getWorld(id);
             if (world != null) {
@@ -526,8 +569,13 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         }
         if (!begin(sender, "operation.catalogue")) return;
         submit(() -> { try { updateCatalogue(revalidate); main(() -> { if (after != null) after.run(); }); }
-            catch (Exception | LinkageError error) { reportFailure(sender, "job.list", error); }
-            finally { main(this::finish); } });
+            catch (Throwable error) { if (!isCancelled()) reportFailure(sender, "job.list", error); }
+            finally { main(() -> {
+                finish();
+                // Somebody asked to cancel the restore reservation while this job ran; it was stopped for that.
+                CommandSender waiting = pendingRestoreCancel; pendingRestoreCancel = null;
+                if (waiting != null) cancelRestore(waiting);
+            }); } });
     }
     Optional<BackupRecord> find(String id) { return catalogue.stream().filter(record -> record.id().equals(id)).findFirst(); }
 
@@ -539,39 +587,46 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         if (find(id).isEmpty()) { tell(sender,text("list.unknown"),false); return; }
         if (!helperAvailable()) { tell(sender,text("restore.helpermissing"),false); return; }
         if (!begin(sender,"operation.verify")) return;
-        audit(sender, "audit.restore.request", id);
-        tell(sender,text("restore.verifying",id),true);
-        submit(() -> {
-            String preparedToken = null;
-            boolean handedOff = false;
-            try {
-                // Reserve exactly what was just verified, never the possibly stale catalogue entry.
-                BackupRecord record = engine.verify(id, this::isCancelled, p -> progress = p);
-                if (isCancelled()) return;
-                restores.setLanguage(helperLanguage());
-                RestoreCoordinator.Reservation reservation = restores.reserve(record.id(), record.zipPath(),
-                        record.sha256(), Duration.ofSeconds(settings.confirmationSeconds()));
-                preparedToken = reservation.token();
-                String token = preparedToken;
-                main(() -> {
-                    boolean committing = false;
-                    try {
-                        // Verification can be slow. Recheck permission and connection on the server
-                        // thread immediately before committing this explicit action.
-                        if (isCancelled() || sender instanceof Player p && !p.isOnline() || !allowed(sender,"restore")) {
-                            restores.cancel(token); return;
-                        }
-                        operation = "operation.reserve";
-                        submit(() -> commitVerifiedRestore(sender, record.id(), token));
-                        committing = true;
-                    } finally { if (!committing) finish(); }
-                });
-                handedOff = true;
-            } catch (Exception | LinkageError error) {
-                if (preparedToken != null) restores.cancel(preparedToken);
-                if (!isCancelled()) reportFailure(sender,"job.restoreprepare",error);
-            } finally { if (!handedOff) main(this::finish); }
-        });
+        boolean queued = false;
+        try {
+            audit(sender, "audit.restore.request", id);
+            tell(sender,text("restore.verifying",id),true);
+            submit(() -> verifyAndReserve(sender, id));
+            queued = true;
+        } finally { if (!queued) finish(); }
+    }
+
+    /** Worker thread. The plugin is "busy" since {@link #requestRestore}. */
+    private void verifyAndReserve(CommandSender sender, String id) {
+        String preparedToken = null;
+        boolean handedOff = false;
+        try {
+            // Reserve exactly what was just verified, never the possibly stale catalogue entry.
+            BackupRecord record = engine.verify(id, this::isCancelled, p -> progress = p);
+            if (isCancelled()) return;
+            restores.setLanguage(helperLanguage());
+            RestoreCoordinator.Reservation reservation = restores.reserve(record.id(), record.zipPath(),
+                    record.sha256(), Duration.ofSeconds(settings.confirmationSeconds()));
+            preparedToken = reservation.token();
+            String token = preparedToken;
+            main(() -> {
+                boolean committing = false;
+                try {
+                    // Verification can be slow. Recheck permission and connection on the server
+                    // thread immediately before committing this explicit action.
+                    if (isCancelled() || sender instanceof Player p && !p.isOnline() || !allowed(sender,"restore")) {
+                        restores.cancel(token); return;
+                    }
+                    operation = "operation.reserve";
+                    submit(() -> commitVerifiedRestore(sender, record.id(), token));
+                    committing = true;
+                } finally { if (!committing) finish(); }
+            });
+            handedOff = true;
+        } catch (Throwable error) {
+            if (preparedToken != null) restores.cancel(preparedToken);
+            if (!isCancelled()) reportFailure(sender,"job.restoreprepare",error);
+        } finally { if (!handedOff) main(this::finish); }
     }
 
     private void commitVerifiedRestore(CommandSender sender, String id, String token) {
@@ -581,11 +636,18 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             // The reason (e.g. helper could not start) is otherwise only in the job directory, if anywhere.
             if (!result.helperReady()) getLogger().warning(text("job.diagnostic", result.message()));
             armedJob = result.jobId();
-            refreshRestoreState();
-            if (result.helperReady()) audit(sender, "audit.restore.reserved", id, result.jobId());
+            // From here on the reservation exists. Failing to read its state back must not be reported as a failed reservation.
+            try { refreshRestoreState(); }
+            catch (IOException | RuntimeException unread) {
+                restoreStatusUncertain = true;
+                getLogger().log(Level.WARNING, text("restore.pollfailed"), unread);
+            }
             main(() -> {
-                // A reservation changes what the next server stop does. Other administrators must not learn that from the result.
-                if (result.helperReady()) notifyAdministrators(text("restore.reservednotice", sender.getName(), id), sender);
+                if (result.helperReady()) {
+                    audit(sender, "audit.restore.reserved", id, result.jobId());
+                    // A reservation changes what the next server stop does. Other administrators must not learn that from the result.
+                    notifyAdministrators(text("restore.reservednotice", sender.getName(), id), sender);
+                }
                 tell(sender,text(result.helperReady() ? "restore.reserved" : restoreReserved() ? "restore.notready" : "restore.notready.cleared", id),result.helperReady());
                 if (result.helperReady()) {
                     tell(sender,text("restore.cancelhint"),true);
@@ -594,10 +656,10 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
                 showRestorePaths(sender, result.jobFile().getParent());
                 if (result.helperReady()) tell(sender,text("restore.restart"),true);
             });
-        } catch (Exception | LinkageError error) {
+        } catch (Throwable error) {
             restores.cancel(token);
             restoreStatusUncertain = true;
-            try { refreshRestoreState(); } catch (IOException ignored) { /* keep unsafe state visible */ }
+            try { refreshRestoreState(); } catch (IOException | RuntimeException ignored) { /* keep unsafe state visible */ }
             reportFailure(sender,"job.restorelaunch",error);
         } finally { main(this::finish); }
     }
@@ -609,21 +671,35 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
             tell(sender,text("restore.verificationcancelled"),true);
             return;
         }
+        if (busy() && operation.equals("operation.catalogue") && restoreReserved()) {
+            // Re-reading a large store takes minutes. A reservation stays cancellable throughout: a
+            // server stopped in the meantime would apply it. The catalogue job is stopped and the
+            // cancellation follows as soon as the worker is free.
+            pendingRestoreCancel = sender;
+            cancelled.set(true);
+            tell(sender,text("restore.cancelqueued"),true);
+            return;
+        }
         if (busy()) { tell(sender,text("job.busy",operation()),false); return; }
         if (!restoreReserved()) { tell(sender,text("restore.nocancel"),false); return; }
         if (!begin(sender,"operation.cancel")) return;
-        audit(sender, "audit.restore.cancel");
-        submit(() -> {
-            try {
-                RestoreCoordinator.CancelResult result = restores.cancelCommitted();
-                refreshRestoreState();
-                main(() -> {
-                    tell(sender,text(result.cancelled() ? "restore.cancelled" : "restore.canceluncertain"),result.cancelled());
-                    if (!result.cancelled() && restoreReserved()) showRestorePaths(sender, restoreJobDirectory());
-                });
-            } catch (Exception | LinkageError error) { reportFailure(sender,"job.restorecancel",error); }
-            finally { main(this::finish); }
-        });
+        boolean queued = false;
+        try {
+            audit(sender, "audit.restore.cancel");
+            submit(() -> {
+                try {
+                    RestoreCoordinator.CancelResult result = restores.cancelCommitted();
+                    refreshRestoreState();
+                    record(sender, text(result.cancelled() ? "restore.cancelled" : "restore.canceluncertain"), result.cancelled());
+                    main(() -> {
+                        tell(sender,text(result.cancelled() ? "restore.cancelled" : "restore.canceluncertain"),result.cancelled());
+                        if (!result.cancelled() && restoreReserved()) showRestorePaths(sender, restoreJobDirectory());
+                    });
+                } catch (Throwable error) { reportFailure(sender,"job.restorecancel",error); }
+                finally { main(this::finish); }
+            });
+            queued = true;
+        } finally { if (!queued) finish(); }
     }
 
     /** Poll external journal state off-thread; keep command and inventory callbacks non-blocking. */
@@ -665,25 +741,30 @@ public final class VaultBackupPlugin extends JavaPlugin implements Listener {
         if (find(id).isEmpty() && !rejected.containsKey(id)) { tell(sender,text("list.unknown"),false); return; }
         if (protectedBackup(id)) { tell(sender,text("delete.protected"),false); return; }
         if (!begin(sender,"operation.delete")) return;
-        audit(sender, "audit.delete", id);
         Player viewer = fromMenu && sender instanceof Player p ? p : null;
-        if (viewer != null) menus.expectReturn(viewer);
-        submit(() -> {
-            try {
-                if (isCancelled()) return;
-                engine.delete(id, restores.protectedBackupIds());
-                updateCatalogue(false);
-                main(() -> {
-                    tell(sender,text("delete.done", id),true);
-                    if (viewer != null) menus.returnToList(viewer);
-                });
-            } catch (Exception | LinkageError error) {
-                if (error instanceof Exception exception)
-                    DeleteFeedback.report(exception, reason -> main(() -> tell(sender,text(DeleteFeedback.messageKey(reason)),false)),
-                            unexpected -> reportFailure(sender,"job.delete",unexpected));
-                else reportFailure(sender,"job.delete",error);
-            } finally { main(() -> { if (viewer != null) menus.forgetReturn(viewer); finish(); }); }
-        });
+        boolean queued = false;
+        try {
+            audit(sender, "audit.delete", id);
+            if (viewer != null) menus.expectReturn(viewer);
+            submit(() -> {
+                try {
+                    if (isCancelled()) return;
+                    engine.delete(id, restores.protectedBackupIds());
+                    updateCatalogue(false);
+                    record(sender, text("delete.done", id), true);
+                    main(() -> {
+                        tell(sender,text("delete.done", id),true);
+                        if (viewer != null) menus.returnToList(viewer);
+                    });
+                } catch (Throwable error) {
+                    if (error instanceof Exception exception)
+                        DeleteFeedback.report(exception, reason -> main(() -> tell(sender,text(DeleteFeedback.messageKey(reason)),false)),
+                                unexpected -> reportFailure(sender,"job.delete",unexpected));
+                    else reportFailure(sender,"job.delete",error);
+                } finally { main(() -> { if (viewer != null) menus.forgetReturn(viewer); finish(); }); }
+            });
+            queued = true;
+        } finally { if (!queued) { if (viewer != null) menus.forgetReturn(viewer); finish(); } }
     }
 
     void reloadSettings(CommandSender sender) {

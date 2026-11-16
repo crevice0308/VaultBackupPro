@@ -42,7 +42,7 @@ final class Messages {
             case "Ready" -> text(language, "progress.ready");
             case "Starting" -> text(language, "progress.starting");
             case "Scanning server files" -> text(language, "progress.scanning");
-            case "Verifying new archive" -> text(language, "progress.verifynew");
+            case com.vaultbackup.core.BackupEngine.PHASE_VERIFYING_NEW_ARCHIVE -> text(language, "progress.verifynew");
             default -> {
                 String[][] phases = {{"Backing up ", "progress.backup"}, {"Backup complete: ", "progress.complete"},
                         {"Retention deleted ", "progress.retention"}, {"Verifying ", "progress.verify"}};

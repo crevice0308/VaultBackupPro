@@ -89,6 +89,12 @@ public final class BackupEngine {
     private record VerifiedArchive(Fingerprint fingerprint, BackupRecord record) { }
 
     /** The source tree contains paths that cannot be archived. Every one found by the scan is listed. */
+    /**
+     * The progress value reported once everything has been read from the server tree. From here on
+     * createBackup only re-reads its own archive, so the server may write its files again.
+     */
+    public static final String PHASE_VERIFYING_NEW_ARCHIVE = "Verifying new archive";
+
     public static final class SourceRefusedException extends IOException {
         private static final long serialVersionUID = 1L;
         private final List<String> problems;
@@ -258,7 +264,7 @@ public final class BackupEngine {
                 BackupRecord provisional = new BackupRecord(id, Instant.now(), label, tempZip, tempMetadata,
                         Files.size(tempZip), total, manifest.size(), hex(archiveDigest.digest()), unstableEntries);
                 writeMetadata(tempMetadata, provisional);
-                progress.accept("Verifying new archive");
+                progress.accept(PHASE_VERIFYING_NEW_ARCHIVE);
                 validateArchive(provisional, options, cancelled, progress);
                 checkCancelled(cancelled);
                 // Metadata is the commit marker and is published last. No nonatomic fallback.
